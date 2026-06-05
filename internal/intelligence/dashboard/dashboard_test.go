@@ -2915,6 +2915,165 @@ func TestAPISessions_CostReconcilesWithModels(t *testing.T) {
 	}
 }
 
+// TestAPISessions_DaysFilterIncludesLongRunningActiveSession guards the
+// activity-window semantics for /api/sessions?days=N. A long-running session
+// that started before the window but has recent spend must still be included;
+// otherwise per-session totals under-count vs /api/models and /api/cost.
+func TestAPISessions_DaysFilterIncludesLongRunningActiveSession(t *testing.T) {
+	s, root := newTestServer(t)
+	st := store.New(s.opts.DB)
+	now := time.Now().UTC()
+
+	var pid int64
+	if err := s.opts.DB.QueryRowContext(
+		context.Background(),
+		`SELECT id FROM projects WHERE root_path = ?`,
+		root,
+	).Scan(&pid); err != nil {
+		t.Fatalf("project id lookup: %v", err)
+	}
+
+	// Session started 45d ago (outside 7d window) but with a recent turn.
+	if err := st.UpsertSession(context.Background(), models.Session{
+		ID: "sLong", ProjectID: pid, Tool: models.ToolClaudeCode,
+		StartedAt: now.Add(-45 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.InsertAPITurn(context.Background(), models.APITurn{
+		SessionID: "sLong", Provider: models.ProviderAnthropic, Model: "claude-sonnet-4-6",
+		InputTokens: 1_000_000, OutputTokens: 50_000,
+		Timestamp: now.Add(-2 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	getJSON := func(url string) map[string]any {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		s.Handler().ServeHTTP(rr, req)
+		if rr.Code != 200 {
+			t.Fatalf("%s: status %d body=%s", url, rr.Code, rr.Body.String())
+		}
+		var got map[string]any
+		if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+			t.Fatalf("%s: decode: %v", url, err)
+		}
+		return got
+	}
+
+	sessionsRsp := getJSON("/api/sessions?days=7&limit=100")
+	modelsRsp := getJSON("/api/models?days=7")
+
+	rows, _ := sessionsRsp["rows"].([]any)
+	var sessionsCostSum float64
+	foundLong := false
+	for _, r := range rows {
+		row, _ := r.(map[string]any)
+		if row["id"] == "sLong" {
+			foundLong = true
+		}
+		if c, ok := row["cost_usd"].(float64); ok {
+			sessionsCostSum += c
+		}
+	}
+	if !foundLong {
+		t.Fatalf("long-running active session sLong missing from /api/sessions?days=7")
+	}
+
+	modelsTotal, _ := modelsRsp["total_cost_usd"].(float64)
+	if sessionsCostSum == 0 {
+		t.Fatalf("sessions cost sum is zero; seeded recent turn should produce spend")
+	}
+	delta := sessionsCostSum - modelsTotal
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta > sessionsCostSum*0.0001 {
+		t.Errorf("sessions cost sum (%.6f) != /api/models total (%.6f): delta=%.6f",
+			sessionsCostSum, modelsTotal, delta)
+	}
+}
+
+// TestAPISessionsCalendar_CostHonorsToolFilter pins that
+// /api/sessions/calendar?tool=X applies the same tool scope to day-costs as
+// /api/cost?tool=X. Session counts were already tool-filtered; cost must be
+// too or the calendar overstates spend for the selected tool.
+func TestAPISessionsCalendar_CostHonorsToolFilter(t *testing.T) {
+	s, root := newTestServer(t)
+	st := store.New(s.opts.DB)
+	now := time.Now().UTC().Add(-time.Hour)
+
+	var pid int64
+	if err := s.opts.DB.QueryRowContext(
+		context.Background(),
+		`SELECT id FROM projects WHERE root_path = ?`,
+		root,
+	).Scan(&pid); err != nil {
+		t.Fatalf("project id lookup: %v", err)
+	}
+
+	// Seed a second tool session so day-cost differs between filtered and
+	// unfiltered views.
+	if err := st.UpsertSession(context.Background(), models.Session{
+		ID: "sCo", ProjectID: pid, Tool: models.ToolCodex, StartedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.InsertAPITurn(context.Background(), models.APITurn{
+		SessionID: "sA", Provider: models.ProviderAnthropic, Model: "claude-sonnet-4-6",
+		InputTokens: 1_000_000, OutputTokens: 50_000, Timestamp: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.InsertAPITurn(context.Background(), models.APITurn{
+		SessionID: "sCo", Provider: models.ProviderOpenAI, Model: "gpt-5.5",
+		InputTokens: 500_000, OutputTokens: 25_000, Timestamp: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	getJSON := func(url string) map[string]any {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		s.Handler().ServeHTTP(rr, req)
+		if rr.Code != 200 {
+			t.Fatalf("%s: status %d body=%s", url, rr.Code, rr.Body.String())
+		}
+		var got map[string]any
+		if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+			t.Fatalf("%s: decode: %v", url, err)
+		}
+		return got
+	}
+
+	cal := getJSON("/api/sessions/calendar?days=30&tool=codex")
+	cost := getJSON("/api/cost?days=30&tool=codex")
+
+	cells, _ := cal["cells"].([]any)
+	var calSum float64
+	for _, c := range cells {
+		cell, _ := c.(map[string]any)
+		if v, ok := cell["cost_usd"].(float64); ok {
+			calSum += v
+		}
+	}
+	costTotal, _ := cost["total_cost_usd"].(float64)
+	if costTotal <= 0 {
+		t.Fatalf("seeded codex turn should produce positive /api/cost total")
+	}
+	delta := calSum - costTotal
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta > costTotal*0.0001 {
+		t.Errorf("sessions calendar sum (%.6f) != /api/cost total (%.6f) for tool=codex",
+			calSum, costTotal)
+	}
+}
+
 // TestAPICost_HonorsToolFilter pins the v1.6.4 fix wiring the `tool`
 // query param through handleCost. Pre-fix the handler only read
 // `project` and `source` and ignored `tool`, so callers using the

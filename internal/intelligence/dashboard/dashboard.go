@@ -442,8 +442,17 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	if days > 0 {
 		since := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
-		where = append(where, "s.started_at >= ?")
-		args = append(args, since.Format(time.RFC3339Nano))
+		sinceISO := since.Format(time.RFC3339Nano)
+		// Window semantics are activity-based, not "session started in
+		// window" only. Without this, long-running sessions that started
+		// before the window but have recent turns are omitted from
+		// /api/sessions while their spend still appears in /api/cost and
+		// /api/models, causing reconciliation drift.
+		where = append(where, `(s.started_at >= ? OR
+			EXISTS (SELECT 1 FROM actions a WHERE a.session_id = s.id AND a.timestamp >= ?) OR
+			EXISTS (SELECT 1 FROM api_turns at WHERE at.session_id = s.id AND at.timestamp >= ?) OR
+			EXISTS (SELECT 1 FROM token_usage tu WHERE tu.session_id = s.id AND tu.timestamp >= ?))`)
+		args = append(args, sinceISO, sinceISO, sinceISO, sinceISO)
 	}
 	if fromDate != "" {
 		where = append(where, "substr(s.started_at, 1, 10) >= ?")
@@ -807,6 +816,7 @@ func (s *Server) handleSessionsCalendar(w http.ResponseWriter, r *http.Request) 
 		GroupBy:     cost.GroupByDay,
 		Source:      cost.SourceAuto,
 		ProjectRoot: project,
+		Tool:        tool,
 		Limit:       365,
 	})
 	if err == nil {
