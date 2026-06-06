@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ColumnDef } from "@tanstack/react-table";
+import type { ColumnDef, SortingState } from "@tanstack/react-table";
 import {
   ActiveFilterChips,
   ChartShell,
@@ -27,6 +27,7 @@ import {
   fmtUSD,
 } from "@/lib/format";
 import type {
+  CostSummary,
   SessionRow,
   SessionsCalendarResponse,
   SessionsResponse,
@@ -66,13 +67,19 @@ export function SessionsPage() {
   const [selected, setSelected] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [filters, setFilters] = useState<SessionFilters>(() => loadFilters());
+  const [sorting, setSorting] = useState<SortingState>([
+    { id: "started_at", desc: true },
+  ]);
+  const sort = sorting[0] ?? { id: "started_at", desc: true };
+  const sortBy = sort.id;
+  const sortDir = sort.desc ? "desc" : "asc";
   useEffect(() => {
     saveFilters(filters);
   }, [filters]);
   const drawerCount = activeFilterCount(filters);
 
   // Reset page when filters change (incl. picked calendar day).
-  const filterKey = `${win}|${tool}|${project}|${pickedDay ?? ""}`;
+  const filterKey = `${win}|${tool}|${project}|${pickedDay ?? ""}|${sortBy}:${sortDir}`;
   const lastKey = useMemo(() => filterKey, [filterKey]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useMemo(() => setPage(1), [lastKey]);
@@ -87,12 +94,26 @@ export function SessionsPage() {
       days: daysParam,
       from_date: pickedDay ?? undefined,
       to_date: pickedDay ?? undefined,
+      sort_by: sortBy,
+      sort_dir: sortDir,
     },
-    [page, win, tool, project, pickedDay],
+    [page, win, tool, project, pickedDay, sortBy, sortDir],
     // Live-capture refresh: 5s while the tab is visible. Lets fresh
     // Antigravity-CLI .pb files (and any other in-progress session)
     // appear without requiring the operator to manually reload.
     { refreshMs: 5000 },
+  );
+  // Window-wide spend summary (same scope as Cost tab) so the Sessions
+  // page can show "visible slice vs full window" explicitly when the
+  // table is paginated.
+  const modelsSummary = useApi<CostSummary>(
+    "/api/models",
+    {
+      tool: toolParam,
+      project: projectParam,
+      days: daysParam,
+    },
+    [win, tool, project],
   );
 
   // Per-day rollup over the full window — drives the Calendar view
@@ -130,6 +151,10 @@ export function SessionsPage() {
     }
     return out;
   }, [rows, query, filters, drawerCount]);
+  const visibleCostUsd = useMemo(
+    () => filtered.reduce((sum, r) => sum + (r.cost_usd || 0), 0),
+    [filtered],
+  );
 
   // Models seen in the loaded page — feeds the drawer's Models chip
   // group so the user only sees models that would actually match a
@@ -226,9 +251,14 @@ export function SessionsPage() {
             {sessions.data && (
               <Pill>{fmtInt(sessions.data.total)} total</Pill>
             )}
+            {sessions.data && <Pill>{fmtInt(filtered.length)} shown</Pill>}
+            {sessions.data && <Pill>{fmtUSD(visibleCostUsd)} visible $</Pill>}
+            {modelsSummary.data && (
+              <Pill>{fmtUSD(modelsSummary.data.total_cost_usd)} window $</Pill>
+            )}
           </span>
         }
-        sub="click any row for the per-session breakdown"
+        sub="click any row for the per-session breakdown (visible rows are paginated; window $ matches Cost tab scope)"
         right={
           <div className="flex items-center gap-2">
             <input
@@ -333,7 +363,14 @@ export function SessionsPage() {
                 rowKey={(r) => r.id}
                 minWidth={840}
                 loading={sessions.loading}
-                initialSort={[{ id: "started_at", desc: true }]}
+                manualSorting
+                sorting={sorting}
+                onSortingChange={(next) =>
+                  setSorting(
+                    next.length > 0
+                      ? next.slice(0, 1)
+                      : [{ id: "started_at", desc: true }],
+                  )}
               />
             </ChartState>
 
@@ -991,4 +1028,3 @@ function escapeCsv(s: string | undefined | null): string {
   if (!s) return "";
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
-

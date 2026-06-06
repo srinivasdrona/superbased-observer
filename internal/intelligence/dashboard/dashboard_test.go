@@ -15,7 +15,9 @@ import (
 
 	"github.com/xuri/excelize/v2"
 
+	"github.com/marmutapp/superbased-observer/internal/config"
 	"github.com/marmutapp/superbased-observer/internal/db"
+	"github.com/marmutapp/superbased-observer/internal/intelligence/cost"
 	"github.com/marmutapp/superbased-observer/internal/models"
 	"github.com/marmutapp/superbased-observer/internal/store"
 )
@@ -1061,7 +1063,10 @@ func TestAPISessions_AttachesTokensAndCost(t *testing.T) {
 		t.Fatalf("status: %d body=%s", rr.Code, rr.Body.String())
 	}
 	var got struct {
-		Rows []struct {
+		PageCostUSD     float64 `json:"page_cost_usd"`
+		PageAICostUSD   float64 `json:"page_ai_cost_usd"`
+		PageToolCostUSD float64 `json:"page_tool_cost_usd"`
+		Rows            []struct {
 			ID                  string  `json:"id"`
 			InputTokens         int64   `json:"input_tokens"`
 			OutputTokens        int64   `json:"output_tokens"`
@@ -1104,6 +1109,112 @@ func TestAPISessions_AttachesTokensAndCost(t *testing.T) {
 	}
 	if row.CostUSD <= 0 {
 		t.Errorf("cost_usd = %f, want > 0 (claude-sonnet-4-6 is priced)", row.CostUSD)
+	}
+	// Response-level page totals should reconcile with the visible rows.
+	if got.PageCostUSD <= 0 {
+		t.Errorf("page_cost_usd = %f, want > 0", got.PageCostUSD)
+	}
+	delta := got.PageCostUSD - row.CostUSD
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta > 1e-9 {
+		t.Errorf("page_cost_usd (%.12f) != row cost (%.12f)", got.PageCostUSD, row.CostUSD)
+	}
+	if got.PageAICostUSD <= 0 {
+		t.Errorf("page_ai_cost_usd = %f, want > 0", got.PageAICostUSD)
+	}
+	if got.PageToolCostUSD != 0 {
+		t.Errorf("page_tool_cost_usd = %f, want 0 for this seed", got.PageToolCostUSD)
+	}
+}
+
+// TestAPISessions_SortByCostIsGlobalAcrossPages pins server-side sort for
+// Sessions: sorting by cost must apply before pagination boundaries. Pre-fix,
+// the frontend sorted only the loaded page slice, so "cost desc" could miss
+// the real top-cost session when it lived on a later page.
+func TestAPISessions_SortByCostIsGlobalAcrossPages(t *testing.T) {
+	s, _ := newTestServer(t)
+	st := store.New(s.opts.DB)
+	root := t.TempDir()
+	now := time.Now().UTC()
+	older := now.Add(-2 * time.Hour)
+	recent := now.Add(-30 * time.Minute)
+
+	if _, err := st.Ingest(context.Background(), []models.ToolEvent{
+		{
+			SourceFile: "f", SourceEventID: "cost-expensive", SessionID: "sExpensive",
+			ProjectRoot: root, Timestamp: older, Tool: models.ToolClaudeCode,
+			ActionType: models.ActionReadFile, Target: "expensive.go", Success: true,
+		},
+		{
+			SourceFile: "f", SourceEventID: "cost-cheap", SessionID: "sCheap",
+			ProjectRoot: root, Timestamp: recent, Tool: models.ToolClaudeCode,
+			ActionType: models.ActionReadFile, Target: "cheap.go", Success: true,
+		},
+	}, nil, store.IngestOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.InsertAPITurn(context.Background(), models.APITurn{
+		SessionID: "sExpensive", Provider: models.ProviderAnthropic,
+		Model:       "claude-sonnet-4-6",
+		InputTokens: 2_000_000, OutputTokens: 100_000,
+		Timestamp: older.Add(10 * time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.InsertAPITurn(context.Background(), models.APITurn{
+		SessionID: "sCheap", Provider: models.ProviderAnthropic,
+		Model:       "claude-sonnet-4-6",
+		InputTokens: 10_000, OutputTokens: 100,
+		Timestamp: recent.Add(10 * time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	fetchPage := func(page int) struct {
+		Rows []struct {
+			ID      string  `json:"id"`
+			CostUSD float64 `json:"cost_usd"`
+		} `json:"rows"`
+	} {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet,
+			fmt.Sprintf("/api/sessions?limit=1&page=%d&sort_by=cost&sort_dir=desc", page), nil)
+		s.Handler().ServeHTTP(rr, req)
+		if rr.Code != 200 {
+			t.Fatalf("page=%d status=%d body=%s", page, rr.Code, rr.Body.String())
+		}
+		var got struct {
+			Rows []struct {
+				ID      string  `json:"id"`
+				CostUSD float64 `json:"cost_usd"`
+			} `json:"rows"`
+		}
+		if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	first := fetchPage(1)
+	if len(first.Rows) != 1 {
+		t.Fatalf("page 1 rows=%d want 1", len(first.Rows))
+	}
+	if first.Rows[0].ID != "sExpensive" {
+		t.Fatalf("page 1 id=%q want sExpensive", first.Rows[0].ID)
+	}
+
+	second := fetchPage(2)
+	if len(second.Rows) != 1 {
+		t.Fatalf("page 2 rows=%d want 1", len(second.Rows))
+	}
+	if second.Rows[0].ID != "sCheap" {
+		t.Fatalf("page 2 id=%q want sCheap", second.Rows[0].ID)
+	}
+	if first.Rows[0].CostUSD <= second.Rows[0].CostUSD {
+		t.Fatalf("cost ordering wrong: page1=%.6f page2=%.6f", first.Rows[0].CostUSD, second.Rows[0].CostUSD)
 	}
 }
 
@@ -2276,6 +2387,118 @@ func TestAPISessionDetail_LongContextPerTurn(t *testing.T) {
 	const wantLC = 1.50 // 250K × $6 / 1M (LC input rate)
 	if diff := got.CostUSD - wantLC; diff > 1e-6 || diff < -1e-6 {
 		t.Errorf("LC turn cost_usd: got %v want %v", got.CostUSD, wantLC)
+	}
+}
+
+// TestAPISessionDetail_UnknownModelRowsStayUnpriced pins the copilot-cli
+// failure mode seen in production: session detail must not coerce empty-model
+// rows to the session's default model and overprice them. Unknown-model rows
+// should remain visible as a "<unknown>" bucket with zero cost, matching the
+// shared cost engine used by /api/cost, /api/models, and /api/sessions.
+func TestAPISessionDetail_UnknownModelRowsStayUnpriced(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "d.db")
+	database, err := db.Open(context.Background(), db.Options{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	st := store.New(database)
+	root := t.TempDir()
+	ts := time.Date(2026, 6, 6, 10, 0, 0, 0, time.UTC)
+
+	if _, err := st.Ingest(context.Background(), []models.ToolEvent{{
+		SourceFile: "f", SourceEventID: "e1", SessionID: "sU",
+		ProjectRoot: root, Timestamp: ts, Tool: models.ToolCopilotCLI,
+		ActionType: models.ActionReadFile, Target: "a.go", Success: true,
+		Model: "claude-opus-4.7-1m-internal",
+	}}, nil, store.IngestOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertSession(context.Background(), models.Session{
+		ID: "sU", ProjectID: 1, Tool: models.ToolCopilotCLI,
+		Model:     "claude-opus-4.7-1m-internal",
+		StartedAt: ts,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// One priced row with a known model.
+	if _, err := st.InsertTokenEvents(context.Background(), []models.TokenEvent{{
+		SourceFile: "events.jsonl", SourceEventID: "known-1", SessionID: "sU",
+		Timestamp: ts, Tool: models.ToolCopilotCLI,
+		Model:       "claude-opus-4.7-1m-internal",
+		InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 5000,
+		Source: models.TokenSourceJSONL, Reliability: models.ReliabilityApproximate,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	// Large unknown-model row: if session detail incorrectly falls back to the
+	// session model this will inflate cost dramatically.
+	if _, err := st.InsertTokenEvents(context.Background(), []models.TokenEvent{{
+		SourceFile: "process.log", SourceEventID: "unknown-1", SessionID: "sU",
+		Timestamp: ts.Add(time.Minute), Tool: models.ToolCopilotCLI,
+		Model:       "",
+		InputTokens: 1_000_000, OutputTokens: 500_000, CacheReadTokens: 2_000_000,
+		Source: models.TokenSourceOTel, Reliability: models.ReliabilityAccurate,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	eng := cost.NewEngine(config.IntelligenceConfig{})
+	summary, err := eng.Summary(context.Background(), database, cost.Options{
+		GroupBy:    cost.GroupBySession,
+		Source:     cost.SourceAuto,
+		SessionIDs: []string{"sU"},
+		Limit:      10,
+		Days:       36500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.Rows) != 1 {
+		t.Fatalf("cost summary rows: got %d want 1", len(summary.Rows))
+	}
+	wantCost := summary.Rows[0].CostUSD
+
+	srv, err := New(Options{DB: database, DBPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/session/sU", nil)
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status: %d body=%s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		CostUSD  float64 `json:"cost_usd"`
+		PerModel []struct {
+			Model   string  `json:"model"`
+			CostUSD float64 `json:"cost_usd"`
+			Input   int64   `json:"input"`
+		} `json:"per_model"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if diff := got.CostUSD - wantCost; diff > 1e-6 || diff < -1e-6 {
+		t.Fatalf("session detail cost %.6f != cost engine %.6f", got.CostUSD, wantCost)
+	}
+	foundUnknown := false
+	for _, m := range got.PerModel {
+		if m.Model == "<unknown>" {
+			foundUnknown = true
+			if m.CostUSD != 0 {
+				t.Errorf("<unknown> bucket cost = %.6f, want 0", m.CostUSD)
+			}
+			if m.Input != 1_000_000 {
+				t.Errorf("<unknown> bucket input = %d, want 1000000", m.Input)
+			}
+		}
+	}
+	if !foundUnknown {
+		t.Fatal("expected <unknown> per_model bucket")
 	}
 }
 

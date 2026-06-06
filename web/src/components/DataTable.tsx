@@ -33,6 +33,13 @@ export type DataTableProps<T> = {
   // refetch never reads as "no data". Set to actions.loading or its
   // page-equivalent on every refetch-capable table.
   loading?: boolean;
+  // Controlled sorting state for server-side sorting flows.
+  sorting?: SortingState;
+  // Called whenever the table sort toggles. Receives the next state.
+  onSortingChange?: (next: SortingState) => void;
+  // When true, headers still toggle sort state, but row ordering is
+  // assumed to be pre-sorted by the caller (server-side/manual sort).
+  manualSorting?: boolean;
 };
 
 export function DataTable<T>({
@@ -46,16 +53,30 @@ export function DataTable<T>({
   zebra,
   stickyHeader,
   loading,
+  sorting: controlledSorting,
+  onSortingChange,
+  manualSorting,
 }: DataTableProps<T>) {
-  const [sorting, setSorting] = useState<SortingState>(initialSort);
+  const [internalSorting, setInternalSorting] = useState<SortingState>(initialSort);
+  const sorting = controlledSorting ?? internalSorting;
 
   const table = useReactTable({
     data,
     columns,
     state: { sorting },
-    onSortingChange: setSorting,
+    onSortingChange: (updater) => {
+      const next =
+        typeof updater === "function"
+          ? (updater as (old: SortingState) => SortingState)(sorting)
+          : updater;
+      if (controlledSorting == null) {
+        setInternalSorting(next);
+      }
+      onSortingChange?.(next);
+    },
     getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
+    manualSorting,
+    getSortedRowModel: manualSorting ? undefined : getSortedRowModel(),
   });
 
   return (

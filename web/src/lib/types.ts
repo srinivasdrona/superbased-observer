@@ -212,6 +212,9 @@ export type SessionsResponse = {
   page: number;
   limit: number;
   total: number;
+  page_cost_usd?: number;
+  page_ai_cost_usd?: number;
+  page_tool_cost_usd?: number;
   scored_count: number;
   days: number;
 };

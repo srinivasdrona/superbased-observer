@@ -428,6 +428,9 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	// day older than the loaded rows).
 	fromDate := r.URL.Query().Get("from_date")
 	toDate := r.URL.Query().Get("to_date")
+	sortBy, sortDesc := parseSessionsSortParams(r)
+	inMemorySort := sessionsSortRequiresInMemory(sortBy)
+	costSort := sessionsSortRequiresCost(sortBy)
 
 	// Build optional WHERE clause over sessions + a project-id lookup.
 	var where []string
@@ -501,16 +504,12 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	// total_actions is computed live; the sessions.total_actions stored
 	// column is never advanced past 0 by any writer (UpsertSession's MAX
 	// merge keeps it at whatever the first batch wrote, scoring computes
-	// len(actions) only into a transient struct). Subquery is cheap at
-	// LIMIT 20 and avoids a stale-column class of bug.
+	// len(actions) only into a transient struct).
 	dataArgs := append([]any{}, args...)
-	dataArgs = append(dataArgs, limit, offset)
 	// last_seen falls back to MAX(actions.timestamp) when ended_at is
 	// NULL (open session) so DurationSeconds is still meaningful for
-	// in-flight sessions. Subqueries are cheap at LIMIT 20.
-	rows, err := s.opts.DB.QueryContext(r.Context(),
-		//nolint:gosec // G202: SQL structure (WHERE/JOIN/scope fragments and any IN placeholder list) is built from code constants; all values are bound via ? args.
-		`SELECT s.id, s.tool, COALESCE(p.root_path, ''), s.started_at,
+	// in-flight sessions.
+	query := `SELECT s.id, s.tool, COALESCE(p.root_path, ''), s.started_at,
 		        COALESCE(s.ended_at,
 		                 (SELECT MAX(a.timestamp) FROM actions a WHERE a.session_id = s.id),
 		                 '') AS last_seen_at,
@@ -519,8 +518,20 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		        s.quality_score, s.error_rate, s.redundancy_ratio
 		 FROM sessions s
 		 LEFT JOIN projects p ON p.id = s.project_id
-		 `+whereClause+`
-		 ORDER BY s.started_at DESC LIMIT ? OFFSET ?`, dataArgs...)
+		 ` + whereClause + `
+		 ORDER BY `
+	if inMemorySort {
+		// In-memory sorts (elapsed + cost/token buckets) need the full
+		// filtered row-set before pagination.
+		query += "s.started_at DESC, s.id ASC"
+	} else {
+		query += sessionsSQLOrderClause(sortBy, sortDesc)
+		query += " LIMIT ? OFFSET ?"
+		dataArgs = append(dataArgs, limit, offset)
+	}
+	rows, err := s.opts.DB.QueryContext(r.Context(),
+		//nolint:gosec // G202: SQL structure (WHERE/JOIN/scope fragments and any IN placeholder list) is built from code constants; all values are bound via ? args.
+		query, dataArgs...)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -629,25 +640,114 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		out = []sessRow{}
 	}
 
-	// Attach per-session token totals + cost from the cost engine. We
-	// scope the rollup to ONLY the page's session_ids via SessionIDs so
-	// the cost engine doesn't load and dedup the entire window's
-	// token_usage rows just to compute totals for the ≤500 sessions
-	// visible on the current page. The window matches the days query
-	// param so the Sessions-page per-session cost sum equals the
-	// Cost-page /api/models total (the v1.6.3 → v1.6.4 reconciliation
-	// fix — handleSessions used to default Days=365 here even when the
-	// caller passed days=30, which over-counted sessions whose
-	// token_usage rows pre-dated the window).
-	//
-	// When days=0 (no time filter) the cost rollup still spans the
-	// full history (Days=36500), keeping CLI callers + un-windowed
-	// programmatic consumers correct.
+	// Attach per-session token totals + cost from the cost engine.
+	// Default path scopes to only the visible page SessionIDs (cheap).
+	// For cost/token sorting, we first attach costs to the full
+	// filtered set, sort globally, then paginate.
+	var (
+		pageCostUSD     float64
+		pageAICostUSD   float64
+		pageToolCostUSD float64
+	)
 	costDays := days
 	if costDays == 0 {
 		costDays = 36500
 	}
-	if len(out) > 0 {
+	costsAttachedToOut := false
+	if inMemorySort && costSort && len(out) > 0 {
+		costSummary, err := s.opts.CostEngine.Summary(r.Context(), s.opts.DB, cost.Options{
+			Days:        costDays,
+			GroupBy:     cost.GroupBySession,
+			Source:      cost.SourceAuto,
+			Tool:        tool,
+			ProjectRoot: project,
+			// Keep high enough to cover practical installs so sorting sees
+			// the full scoped row-set (zero-cost sessions still stay at 0).
+			Limit: 1_000_000,
+		})
+		if err != nil {
+			s.opts.Logger.Warn("sessions: global cost rollup failed", "err", err)
+		} else {
+			byID := make(map[string]cost.Row, len(costSummary.Rows))
+			for _, row := range costSummary.Rows {
+				byID[row.Key] = row
+			}
+			for i := range out {
+				row, ok := byID[out[i].ID]
+				if !ok {
+					continue
+				}
+				out[i].InputTokens = row.Tokens.Input
+				out[i].OutputTokens = row.Tokens.Output
+				out[i].CacheReadTokens = row.Tokens.CacheRead
+				out[i].CacheCreationTokens = row.Tokens.CacheCreation
+				out[i].CacheCreation1hTokens = row.Tokens.CacheCreation1h
+				out[i].ReasoningTokens = row.Tokens.Reasoning
+				out[i].WebSearchRequests = row.Tokens.WebSearchRequests
+				out[i].TotalTokens = row.Tokens.Input + row.Tokens.Output +
+					row.Tokens.CacheRead + row.Tokens.CacheCreation
+				out[i].CostUSD = row.CostUSD
+				out[i].AICostUSD = row.AICostUSD
+				out[i].ToolCostUSD = row.ToolCostUSD
+				out[i].CostReliability = row.Reliability
+			}
+			costsAttachedToOut = true
+		}
+	}
+	if inMemorySort {
+		sort.SliceStable(out, func(i, j int) bool {
+			left := out[i]
+			right := out[j]
+			compareNumeric := func(a, b float64) bool {
+				if a != b {
+					if sortDesc {
+						return a > b
+					}
+					return a < b
+				}
+				if left.StartedAt != right.StartedAt {
+					return left.StartedAt > right.StartedAt
+				}
+				return left.ID < right.ID
+			}
+			switch sortBy {
+			case "elapsed":
+				return compareNumeric(float64(left.DurationSeconds), float64(right.DurationSeconds))
+			case "input":
+				return compareNumeric(float64(left.InputTokens), float64(right.InputTokens))
+			case "cache_r":
+				return compareNumeric(float64(left.CacheReadTokens), float64(right.CacheReadTokens))
+			case "cache_w":
+				return compareNumeric(float64(left.CacheCreationTokens), float64(right.CacheCreationTokens))
+			case "output":
+				return compareNumeric(float64(left.OutputTokens), float64(right.OutputTokens))
+			case "cost":
+				return compareNumeric(left.CostUSD, right.CostUSD)
+			default:
+				if left.StartedAt != right.StartedAt {
+					return left.StartedAt > right.StartedAt
+				}
+				return left.ID < right.ID
+			}
+		})
+		if offset >= len(out) {
+			out = []sessRow{}
+		} else {
+			end := offset + limit
+			if end > len(out) {
+				end = len(out)
+			}
+			out = out[offset:end]
+		}
+		if costsAttachedToOut {
+			for _, sr := range out {
+				pageCostUSD += sr.CostUSD
+				pageAICostUSD += sr.AICostUSD
+				pageToolCostUSD += sr.ToolCostUSD
+			}
+		}
+	}
+	if len(out) > 0 && !costsAttachedToOut {
 		pageSessionIDs := make([]string, len(out))
 		for i, sr := range out {
 			pageSessionIDs[i] = sr.ID
@@ -685,9 +785,14 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 				out[i].AICostUSD = row.AICostUSD
 				out[i].ToolCostUSD = row.ToolCostUSD
 				out[i].CostReliability = row.Reliability
+				pageCostUSD += row.CostUSD
+				pageAICostUSD += row.AICostUSD
+				pageToolCostUSD += row.ToolCostUSD
 			}
 		}
+	}
 
+	if len(out) > 0 {
 		// Attach per-session model list — one query batches across the
 		// page's session IDs and unions api_turns + token_usage. Models
 		// are ordered by turn count desc so out[i].Models[0] is the
@@ -736,13 +841,74 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, map[string]any{
-		"rows":         out,
-		"page":         page,
-		"limit":        limit,
-		"total":        total,
-		"scored_count": scoredCount,
-		"days":         days,
+		"rows":               out,
+		"page":               page,
+		"limit":              limit,
+		"total":              total,
+		"page_cost_usd":      pageCostUSD,
+		"page_ai_cost_usd":   pageAICostUSD,
+		"page_tool_cost_usd": pageToolCostUSD,
+		"scored_count":       scoredCount,
+		"days":               days,
 	})
+}
+
+func parseSessionsSortParams(r *http.Request) (sortBy string, desc bool) {
+	sortBy = strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort_by")))
+	switch sortBy {
+	case "session", "tool", "project", "started_at", "elapsed", "actions",
+		"input", "cache_r", "cache_w", "output", "cost", "quality",
+		"errors", "redundancy":
+	default:
+		sortBy = "started_at"
+	}
+	desc = strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort_dir"))) != "asc"
+	return sortBy, desc
+}
+
+func sessionsSortRequiresInMemory(sortBy string) bool {
+	switch sortBy {
+	case "elapsed", "input", "cache_r", "cache_w", "output", "cost":
+		return true
+	default:
+		return false
+	}
+}
+
+func sessionsSortRequiresCost(sortBy string) bool {
+	switch sortBy {
+	case "input", "cache_r", "cache_w", "output", "cost":
+		return true
+	default:
+		return false
+	}
+}
+
+func sessionsSQLOrderClause(sortBy string, desc bool) string {
+	dir := "ASC"
+	if desc {
+		dir = "DESC"
+	}
+	expr := "s.started_at"
+	switch sortBy {
+	case "session":
+		expr = "s.id"
+	case "tool":
+		expr = "s.tool"
+	case "project":
+		expr = "COALESCE(p.root_path, '')"
+	case "started_at":
+		expr = "s.started_at"
+	case "actions":
+		expr = "total_actions"
+	case "quality":
+		expr = "COALESCE(s.quality_score, -1.0)"
+	case "errors":
+		expr = "COALESCE(s.error_rate, -1.0)"
+	case "redundancy":
+		expr = "COALESCE(s.redundancy_ratio, -1.0)"
+	}
+	return expr + " " + dir + ", s.started_at DESC, s.id ASC"
 }
 
 // handleSessionsCalendar — GET /api/sessions/calendar?days=N
@@ -1425,10 +1591,9 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 		       OR source_event_id NOT IN (SELECT request_id FROM proxy_turn_ids))
 	)`
 
-	sessionModel := d.Model
 	rows, err := s.opts.DB.QueryContext(r.Context(),
 		dedupedRowsCTE+`
-		SELECT COALESCE(NULLIF(model, ''), ?),
+		SELECT COALESCE(model, ''),
 		       COALESCE(input_tokens, 0),
 		       COALESCE(output_tokens, 0),
 		       COALESCE(cache_read_tokens, 0),
@@ -1438,7 +1603,7 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 		       COALESCE(web_search_requests, 0),
 		       COALESCE(cost_usd, 0)
 		FROM combined`,
-		id, id, id, sessionModel)
+		id, id, id)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1460,6 +1625,9 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 			&recorded); err != nil {
 			writeErr(w, err)
 			return
+		}
+		if modelKey == "" {
+			modelKey = "<unknown>"
 		}
 		// Per-row cost: prefer recorded estimated_cost_usd / cost_usd
 		// when non-zero (only OpenCode + Pi adapters set it today; api_turns

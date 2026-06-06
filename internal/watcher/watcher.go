@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -156,6 +157,13 @@ func (w *Watcher) Rescan(ctx context.Context) (ScanResult, error) {
 	return w.scan(ctx, true)
 }
 
+// RescanPaths is the targeted recovery path: it reparses only the
+// supplied files from offset 0 rather than walking every adapter root.
+// Used by routine backfills that already know which files are stale.
+func (w *Watcher) RescanPaths(ctx context.Context, paths []string) (ScanResult, error) {
+	return w.scanPaths(ctx, true, paths)
+}
+
 func (w *Watcher) scan(ctx context.Context, forceFromZero bool) (ScanResult, error) {
 	var res ScanResult
 	detected := w.registry.Detected(w.allow)
@@ -197,10 +205,55 @@ func (w *Watcher) scan(ctx context.Context, forceFromZero bool) (ScanResult, err
 	return res, nil
 }
 
+func (w *Watcher) scanPaths(ctx context.Context, forceFromZero bool, paths []string) (ScanResult, error) {
+	var res ScanResult
+	detected := w.registry.Detected(w.allow)
+	if len(detected) == 0 {
+		w.logger.Info("watcher.ScanPaths: no adapters detected — nothing to do")
+		return res, nil
+	}
+	for _, path := range paths {
+		if ctx.Err() != nil {
+			return res, ctx.Err()
+		}
+		if path == "" {
+			continue
+		}
+		if _, err := os.Stat(path); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			res.Errors++
+			w.logger.Warn("watcher.ScanPaths: stat failed", "path", path, "err", err)
+			continue
+		}
+		var matched adapter.Adapter
+		for _, a := range detected {
+			if a.IsSessionFile(path) {
+				matched = a
+				break
+			}
+		}
+		if matched == nil {
+			continue
+		}
+		if err := w.processFile(ctx, matched, path, forceFromZero); err != nil {
+			res.Errors++
+			w.logger.Warn("watcher.ScanPaths: process failed",
+				"adapter", matched.Name(), "path", path, "err", err)
+			continue
+		}
+		res.FilesProcessed++
+		res.ProcessedPaths = append(res.ProcessedPaths, path)
+	}
+	return res, nil
+}
+
 // ScanResult is the summary of a scan invocation.
 type ScanResult struct {
 	FilesProcessed int
 	Errors         int
+	ProcessedPaths []string `json:"-"`
 }
 
 // Watch starts an fsnotify watch on every detected adapter's roots (plus an
@@ -400,6 +453,16 @@ func (w *Watcher) processFile(ctx context.Context, a adapter.Adapter, path strin
 		if err := w.store.SetCursor(ctx, path, target); err != nil {
 			return err
 		}
+	}
+	if info, err := os.Stat(path); err == nil {
+		_ = w.store.UpsertFileIngestState(ctx, store.FileIngestState{
+			Tool:          a.Name(),
+			Path:          path,
+			SizeBytes:     info.Size(),
+			MtimeUnixNS:   info.ModTime().UTC().UnixNano(),
+			LastScanAt:    time.Now().UTC(),
+			ParserVersion: 1,
+		}, forceFromZero)
 	}
 	return nil
 }

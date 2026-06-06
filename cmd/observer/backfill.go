@@ -106,6 +106,7 @@ func newBackfillCmd() *cobra.Command {
 		geminiCliRescan        bool
 		copilotCliRescan       bool
 		all                    bool
+		breakLock              bool
 		dryRun                 bool
 		jsonOut                bool
 		limit                  int
@@ -237,7 +238,8 @@ historical rows in sync with the latest schema and adapter behaviour.`,
 				geminiCliRescan = true
 				copilotCliRescan = true
 			}
-			if !isSidechain && !cacheTier && !messageID &&
+			if !breakLock &&
+				!isSidechain && !cacheTier && !messageID &&
 				!opencodeMessageID && !opencodeParts && !opencodeTokens &&
 				!openclawActionTypes && !openclawModel && !openclawProjectRoot && !openclawReasoning && !openclawSessionID &&
 				!codexReasoning && !codexProjectRoot && !claudecodeProjectRoot && !antigravityProjectRoot && !cursorModel &&
@@ -245,7 +247,7 @@ historical rows in sync with the latest schema and adapter behaviour.`,
 				!claudecodeUserPrompts && !claudecodeAPIErrors &&
 				!cursorUserPrompts && !cursorSubagents && !coworkRescan && !coworkProjectRoot && !codexRescan &&
 				!antigravityRescan && !geminiCliRescan && !copilotCliRescan {
-				return fmt.Errorf("nothing to backfill — pass one of the dimension flags or --all")
+				return fmt.Errorf("nothing to backfill — pass one of the dimension flags, --all, or --break-lock")
 			}
 
 			// --dry-run: snapshot the live DB and re-point every
@@ -276,6 +278,48 @@ historical rows in sync with the latest schema and adapter behaviour.`,
 				piMessageID = true
 			}
 
+			_, database, cleanup, err := loadConfigAndDB(cmd.Context(), configPath)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			st := store.New(database)
+
+			if breakLock {
+				if err := st.BreakMaintenanceLease(cmd.Context(), backfillLeaseName); err != nil {
+					return err
+				}
+				if !(isSidechain || cacheTier || messageID ||
+					opencodeMessageID || opencodeParts || opencodeTokens ||
+					openclawActionTypes || openclawModel || openclawProjectRoot || openclawReasoning || openclawSessionID ||
+					codexReasoning || codexProjectRoot || claudecodeProjectRoot || antigravityProjectRoot || cursorModel ||
+					copilotMessageID || piMessageID ||
+					claudecodeUserPrompts || claudecodeAPIErrors ||
+					cursorUserPrompts || cursorSubagents || coworkRescan || coworkProjectRoot || codexRescan ||
+					antigravityRescan || geminiCliRescan || copilotCliRescan) {
+					if !jsonOut {
+						fmt.Fprintln(cmd.OutOrStdout(), "maintenance lock cleared")
+					}
+					return nil
+				}
+			}
+
+			var stopHeartbeat func()
+			if !dryRun {
+				ownerToken := newBackfillOwnerToken()
+				acquired, lease, err := st.AcquireMaintenanceLease(cmd.Context(), backfillLeaseName, ownerToken, time.Now().UTC(), backfillLeaseTTL)
+				if err != nil {
+					return err
+				}
+				if !acquired {
+					return fmt.Errorf("maintenance lock held by owner=%s heartbeat=%s; wait for the running job to finish or pass --break-lock to clear a stale lease",
+						lease.OwnerToken, lease.HeartbeatAt.Format(time.RFC3339))
+				}
+				stopHeartbeat = startBackfillLeaseHeartbeat(cmd.Context(), st, ownerToken, cmd.ErrOrStderr())
+				defer stopHeartbeat()
+				defer func() { _ = st.ReleaseMaintenanceLease(context.Background(), backfillLeaseName, ownerToken) }()
+			}
+
 			summary := struct {
 				Rescan                 *watcher.ScanResult             `json:"rescan,omitempty"`
 				IsSidechain            *BackfillResult                 `json:"is_sidechain,omitempty"`
@@ -302,57 +346,31 @@ historical rows in sync with the latest schema and adapter behaviour.`,
 				CursorUserPrompts      *CursorUserPromptsBackfill      `json:"cursor_user_prompts,omitempty"`
 				CursorSubagents        *CursorSubagentsBackfill        `json:"cursor_subagents,omitempty"`
 			}{}
-
-			// --all kicks a full rescan from offset 0 BEFORE the surgical
-			// backfills. This is the recovery path for when the live
-			// watcher fell behind silently (fsnotify event drops, daemon
-			// restart with stale parse_cursors, etc.) — without this,
-			// missing assistant tool-call rows would never re-ingest.
-			// Surgical backfills only update specific columns on rows
-			// that already exist; they don't insert anything new.
-			if all {
-				w, wCleanup, err := buildWatcher(cmd.Context(), configPath)
-				if err != nil {
-					return fmt.Errorf("--all rescan: %w", err)
+			mergeRescan := func(res watcher.ScanResult) {
+				if summary.Rescan == nil {
+					copyRes := res
+					summary.Rescan = &copyRes
+					return
 				}
-				rescanRes, rescanErr := w.Rescan(cmd.Context())
-				wCleanup()
-				if rescanErr != nil {
-					return fmt.Errorf("--all rescan: %w", rescanErr)
-				}
-				summary.Rescan = &rescanRes
-				if !jsonOut {
-					fmt.Fprintf(
-						cmd.OutOrStdout(),
-						"rescan complete: files_processed=%d errors=%d (re-walked every JSONL from offset 0; (source_file, source_event_id) UNIQUE keeps it idempotent)\n",
-						rescanRes.FilesProcessed, rescanRes.Errors,
-					)
-				}
+				summary.Rescan.FilesProcessed += res.FilesProcessed
+				summary.Rescan.Errors += res.Errors
 			}
 
 			// --cowork-rescan: fast cowork-only rescan path. Equivalent to
-			// `observer scan --force --adapter cowork` but discoverable via
-			// the dashboard's Backfill UI. Standalone or composable with
-			// --all (in which case the all-pass already covered cowork —
-			// running this is a no-op via the UNIQUE index).
+			// `observer scan --force --adapter cowork` but candidate-driven
+			// by default: only source files whose repair version is stale
+			// are replayed. Full offset-0 tree walks remain on `scan --force`.
 			if coworkRescan {
-				w, wCleanup, err := buildWatcherWithOverride(cmd.Context(), configPath, "cowork")
+				rescanRes, selected, err := runTargetedRepairRescan(cmd.Context(), configPath, st, "cowork", models.ToolCowork, repairKeyCoworkRescan, repairVersionInitial)
 				if err != nil {
 					return fmt.Errorf("--cowork-rescan: %w", err)
 				}
-				rescanRes, rescanErr := w.Rescan(cmd.Context())
-				wCleanup()
-				if rescanErr != nil {
-					return fmt.Errorf("--cowork-rescan: %w", rescanErr)
-				}
-				if summary.Rescan == nil {
-					summary.Rescan = &rescanRes
-				}
+				mergeRescan(rescanRes)
 				if !jsonOut {
 					fmt.Fprintf(
 						cmd.OutOrStdout(),
-						"cowork rescan complete: files_processed=%d errors=%d (cowork audit.jsonl only)\n",
-						rescanRes.FilesProcessed, rescanRes.Errors,
+						"cowork rescan complete: candidate_files=%d files_processed=%d errors=%d (cowork audit.jsonl only)\n",
+						selected, rescanRes.FilesProcessed, rescanRes.Errors,
 					)
 				}
 			}
@@ -364,26 +382,19 @@ historical rows in sync with the latest schema and adapter behaviour.`,
 			//     event_msg/web_search_end counts
 			//   - new ActionRateLimit rows from token_count.rate_limits
 			//   - new codex.reasoning rows from response_item.reasoning
-			// Standalone or composable with --all; (source_file,
-			// source_event_id) UNIQUE keeps it idempotent.
+			// Candidate-driven by default; full replay remains on
+			// `observer scan --force --adapter codex`.
 			if codexRescan {
-				w, wCleanup, err := buildWatcherWithOverride(cmd.Context(), configPath, "codex")
+				rescanRes, selected, err := runTargetedRepairRescan(cmd.Context(), configPath, st, "codex", models.ToolCodex, repairKeyCodexRescan, repairVersionInitial)
 				if err != nil {
 					return fmt.Errorf("--codex-rescan: %w", err)
 				}
-				rescanRes, rescanErr := w.Rescan(cmd.Context())
-				wCleanup()
-				if rescanErr != nil {
-					return fmt.Errorf("--codex-rescan: %w", rescanErr)
-				}
-				if summary.Rescan == nil {
-					summary.Rescan = &rescanRes
-				}
+				mergeRescan(rescanRes)
 				if !jsonOut {
 					fmt.Fprintf(
 						cmd.OutOrStdout(),
-						"codex rescan complete: files_processed=%d errors=%d (codex rollouts only)\n",
-						rescanRes.FilesProcessed, rescanRes.Errors,
+						"codex rescan complete: candidate_files=%d files_processed=%d errors=%d (codex rollouts only)\n",
+						selected, rescanRes.FilesProcessed, rescanRes.Errors,
 					)
 				}
 			}
@@ -397,23 +408,16 @@ historical rows in sync with the latest schema and adapter behaviour.`,
 			// via the dashboard Backfill UI as "antigravity (rescan +
 			// recover)".
 			if antigravityRescan {
-				w, wCleanup, err := buildWatcherWithOverride(cmd.Context(), configPath, "antigravity")
+				rescanRes, selected, err := runTargetedRepairRescan(cmd.Context(), configPath, st, "antigravity", models.ToolAntigravity, repairKeyAntigravityRescan, repairVersionInitial)
 				if err != nil {
 					return fmt.Errorf("--antigravity-rescan: %w", err)
 				}
-				rescanRes, rescanErr := w.Rescan(cmd.Context())
-				wCleanup()
-				if rescanErr != nil {
-					return fmt.Errorf("--antigravity-rescan: %w", rescanErr)
-				}
-				if summary.Rescan == nil {
-					summary.Rescan = &rescanRes
-				}
+				mergeRescan(rescanRes)
 				if !jsonOut {
 					fmt.Fprintf(
 						cmd.OutOrStdout(),
-						"antigravity rescan complete: files_processed=%d errors=%d (antigravity .pb / state.vscdb only)\n",
-						rescanRes.FilesProcessed, rescanRes.Errors,
+						"antigravity rescan complete: candidate_files=%d files_processed=%d errors=%d (antigravity .pb / state.vscdb only)\n",
+						selected, rescanRes.FilesProcessed, rescanRes.Errors,
 					)
 				}
 			}
@@ -421,26 +425,19 @@ historical rows in sync with the latest schema and adapter behaviour.`,
 			// --gemini-cli-rescan: fast gemini-cli-only rescan path.
 			// Re-walks every JSON/JSONL under ~/.gemini/tmp/<hash>/chats/.
 			// gemini-cli has no surgical column backfills — its only
-			// retroactive path is a tree re-walk. Surfaced via the
-			// dashboard Backfill UI as "gemini-cli (rescan)".
+			// retroactive path is a targeted replay over stale candidate
+			// files. Full tree replay remains on `scan --force`.
 			if geminiCliRescan {
-				w, wCleanup, err := buildWatcherWithOverride(cmd.Context(), configPath, "gemini-cli")
+				rescanRes, selected, err := runTargetedRepairRescan(cmd.Context(), configPath, st, "gemini-cli", models.ToolGeminiCLI, repairKeyGeminiCLIRescan, repairVersionInitial)
 				if err != nil {
 					return fmt.Errorf("--gemini-cli-rescan: %w", err)
 				}
-				rescanRes, rescanErr := w.Rescan(cmd.Context())
-				wCleanup()
-				if rescanErr != nil {
-					return fmt.Errorf("--gemini-cli-rescan: %w", rescanErr)
-				}
-				if summary.Rescan == nil {
-					summary.Rescan = &rescanRes
-				}
+				mergeRescan(rescanRes)
 				if !jsonOut {
 					fmt.Fprintf(
 						cmd.OutOrStdout(),
-						"gemini-cli rescan complete: files_processed=%d errors=%d (~/.gemini/tmp only)\n",
-						rescanRes.FilesProcessed, rescanRes.Errors,
+						"gemini-cli rescan complete: candidate_files=%d files_processed=%d errors=%d (~/.gemini/tmp only)\n",
+						selected, rescanRes.FilesProcessed, rescanRes.Errors,
 					)
 				}
 			}
@@ -452,34 +449,22 @@ historical rows in sync with the latest schema and adapter behaviour.`,
 			// re-running this after enabling `--log-level debug` retrofits
 			// accurate input/cache/reasoning tokens onto historical
 			// sessions. Surfaced via the dashboard Backfill UI as
-			// "copilot-cli (rescan)".
+			// "copilot-cli (rescan)". Candidate-driven by default; full
+			// tree replay remains on `scan --force --adapter copilot-cli`.
 			if copilotCliRescan {
-				w, wCleanup, err := buildWatcherWithOverride(cmd.Context(), configPath, "copilot-cli")
+				rescanRes, selected, err := runTargetedRepairRescan(cmd.Context(), configPath, st, "copilot-cli", models.ToolCopilotCLI, repairKeyCopilotCLIRescan, repairVersionInitial)
 				if err != nil {
 					return fmt.Errorf("--copilot-cli-rescan: %w", err)
 				}
-				rescanRes, rescanErr := w.Rescan(cmd.Context())
-				wCleanup()
-				if rescanErr != nil {
-					return fmt.Errorf("--copilot-cli-rescan: %w", rescanErr)
-				}
-				if summary.Rescan == nil {
-					summary.Rescan = &rescanRes
-				}
+				mergeRescan(rescanRes)
 				if !jsonOut {
 					fmt.Fprintf(
 						cmd.OutOrStdout(),
-						"copilot-cli rescan complete: files_processed=%d errors=%d (~/.copilot/{session-state,logs} only)\n",
-						rescanRes.FilesProcessed, rescanRes.Errors,
+						"copilot-cli rescan complete: candidate_files=%d files_processed=%d errors=%d (~/.copilot/{session-state,logs} only)\n",
+						selected, rescanRes.FilesProcessed, rescanRes.Errors,
 					)
 				}
 			}
-
-			_, database, cleanup, err := loadConfigAndDB(cmd.Context(), configPath)
-			if err != nil {
-				return err
-			}
-			defer cleanup()
 
 			if isSidechain {
 				res, err := backfillIsSidechain(cmd.Context(), database, claudeProjectsDir(), limit)
@@ -514,9 +499,12 @@ historical rows in sync with the latest schema and adapter behaviour.`,
 				if err != nil {
 					return err
 				}
-				codexRes, err := backfillCodexMessageID(cmd.Context(), database, codexSessionsDir(), limit)
-				if err != nil {
-					return err
+				codexRes := MessageIDBackfill{}
+				if !codexRescan {
+					codexRes, err = backfillCodexMessageID(cmd.Context(), database, codexSessionsDir(), limit)
+					if err != nil {
+						return err
+					}
 				}
 				cursorRes, err := backfillCursorMessageID(cmd.Context(), database)
 				if err != nil {
@@ -548,6 +536,9 @@ historical rows in sync with the latest schema and adapter behaviour.`,
 						"message-id backfill complete: scanned %d files, %d lines examined, updated %d action rows + %d token_usage rows\n",
 						res.FilesScanned, res.LinesExamined, res.ActionsUpdated, res.TokenUsageUpdated,
 					)
+					if codexRescan {
+						fmt.Fprintln(cmd.OutOrStdout(), "codex message_id lift reused the codex targeted rescan path in this invocation")
+					}
 				}
 			}
 
@@ -758,17 +749,25 @@ historical rows in sync with the latest schema and adapter behaviour.`,
 				}
 			}
 			if copilotMessageID {
-				res, err := backfillCopilotMessageID(cmd.Context(), database)
-				if err != nil {
-					return err
+				res := MessageIDBackfill{}
+				if !copilotCliRescan {
+					var err error
+					res, err = backfillCopilotMessageID(cmd.Context(), database)
+					if err != nil {
+						return err
+					}
 				}
 				summary.CopilotMessageID = &res
 				if !jsonOut {
-					fmt.Fprintf(
-						cmd.OutOrStdout(),
-						"copilot message-id backfill complete: scanned %d files, examined %d lines; updated %d action rows + %d token_usage rows\n",
-						res.FilesScanned, res.LinesExamined, res.ActionsUpdated, res.TokenUsageUpdated,
-					)
+					if copilotCliRescan {
+						fmt.Fprintln(cmd.OutOrStdout(), "copilot message_id lift reused the copilot-cli targeted rescan path in this invocation")
+					} else {
+						fmt.Fprintf(
+							cmd.OutOrStdout(),
+							"copilot message-id backfill complete: scanned %d files, examined %d lines; updated %d action rows + %d token_usage rows\n",
+							res.FilesScanned, res.LinesExamined, res.ActionsUpdated, res.TokenUsageUpdated,
+						)
+					}
 				}
 			}
 			if piMessageID {
@@ -874,11 +873,12 @@ historical rows in sync with the latest schema and adapter behaviour.`,
 	cmd.Flags().BoolVar(&cursorSubagents, "cursor-subagents", false, "Walk Cursor agent-transcripts/<session>/subagents/<sub>.jsonl files and ingest as sidechain rows under the parent session (IsSidechain=true)")
 	cmd.Flags().BoolVar(&coworkRescan, "cowork-rescan", false, "Fast rescan of the Cowork audit.jsonl tree only — same effect as `observer scan --force --adapter cowork` but discoverable via the dashboard Backfill UI. Use when adding cowork to enabled_adapters mid-flight without rescanning every other adapter's tree.")
 	cmd.Flags().BoolVar(&coworkProjectRoot, "cowork-project-root", false, "Re-attribute Cowork action / session rows to the correct project_id when their sidecar.userSelectedFolders was a Windows-style path that previously misresolved to observer's own repo (v1.4.54)")
-	cmd.Flags().BoolVar(&codexRescan, "codex-rescan", false, "Fast rescan of the Codex rollout tree only — re-walks every JSONL from offset 0 to pick up v1.4.53 adapter additions: token_usage.web_search_requests + ActionRateLimit rows from token_count.rate_limits + codex.reasoning rows from response_item.reasoning. Idempotent via the (source_file, source_event_id) UNIQUE index.")
-	cmd.Flags().BoolVar(&antigravityRescan, "antigravity-rescan", false, "Fast rescan of the Antigravity tree only — re-walks every .pb / state.vscdb under the configured watch roots and re-ingests via the antigravity adapter (local decrypt first, falls back to language_server gRPC when [observer.antigravity] network_recovery = \"local\"). Idempotent.")
-	cmd.Flags().BoolVar(&geminiCliRescan, "gemini-cli-rescan", false, "Fast rescan of the Gemini CLI tree only — re-walks ~/.gemini/tmp/<hash>/chats/ JSON / JSONL. gemini-cli has no surgical column backfills; this is its only retroactive path. Idempotent.")
-	cmd.Flags().BoolVar(&copilotCliRescan, "copilot-cli-rescan", false, "Fast rescan of the GitHub Copilot CLI tree only — re-walks events.jsonl under ~/.copilot/session-state AND process-*.log under ~/.copilot/logs (cross-mount aware). Run after enabling `copilot --log-level debug` to retrofit Tier-1 accurate input/cache/reasoning tokens onto historical sessions. Idempotent.")
+	cmd.Flags().BoolVar(&codexRescan, "codex-rescan", false, "Targeted codex historical replay — replays only codex source files whose repair version is stale, picking up v1.4.53 adapter additions such as web_search_requests, ActionRateLimit rows, and reasoning rows. Use `observer scan --force --adapter codex` for a full offset-0 recovery walk.")
+	cmd.Flags().BoolVar(&antigravityRescan, "antigravity-rescan", false, "Targeted antigravity historical replay — replays only stale antigravity source files (local decrypt first, falls back to language_server gRPC when [observer.antigravity] network_recovery = \"local\"). Use `observer scan --force --adapter antigravity` for a full tree replay.")
+	cmd.Flags().BoolVar(&geminiCliRescan, "gemini-cli-rescan", false, "Targeted Gemini CLI historical replay over stale source files only. Use `observer scan --force --adapter gemini-cli` for a full tree replay.")
+	cmd.Flags().BoolVar(&copilotCliRescan, "copilot-cli-rescan", false, "Targeted GitHub Copilot CLI historical replay — replays only stale events.jsonl / process-*.log files to retrofit Tier-1 accurate input/cache/reasoning tokens. Use `observer scan --force --adapter copilot-cli` for a full tree replay.")
 	cmd.Flags().BoolVar(&all, "all", false, "Run every supported backfill in one invocation (recommended after upgrading)")
+	cmd.Flags().BoolVar(&breakLock, "break-lock", false, "Force-clear the historical maintenance lease before continuing. Use only when a prior backfill crashed and left a stale lock behind.")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Snapshot the live DB via VACUUM INTO and run the requested backfills against the snapshot instead of the live DB. Reports what WOULD update; live DB untouched. Snapshot is deleted on exit. See docs/backfill-flag-audit-2026-05-19.md.")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Emit JSON")
 	cmd.Flags().IntVar(&limit, "limit", 0, "Stop after N source files per JSONL-walking pass (0 = all)")
@@ -909,6 +909,20 @@ type MessageIDBackfill struct {
 	ActionsUpdated    int `json:"actions_updated"`
 	TokenUsageUpdated int `json:"token_usage_updated"`
 }
+
+const (
+	backfillLeaseName          = "historical-backfill"
+	backfillLeaseTTL           = 10 * time.Minute
+	backfillLeaseHeartbeatTick = 1 * time.Minute
+
+	repairKeyCoworkRescan      = "cowork-rescan"
+	repairKeyCodexRescan       = "codex-rescan"
+	repairKeyAntigravityRescan = "antigravity-rescan"
+	repairKeyGeminiCLIRescan   = "gemini-cli-rescan"
+	repairKeyCopilotCLIRescan  = "copilot-cli-rescan"
+
+	repairVersionInitial = 1
+)
 
 // claudeProjectsDir returns the location Claude Code writes its session
 // JSONL files. Honors $CLAUDE_HOME for tests + non-default installs;
@@ -943,6 +957,70 @@ func cursorLogsDir() string {
 func cursorProjectsDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".cursor", "projects")
+}
+
+func newBackfillOwnerToken() string {
+	seed := fmt.Sprintf("%d:%d", os.Getpid(), time.Now().UnixNano())
+	sum := sha256.Sum256([]byte(seed))
+	return fmt.Sprintf("pid-%d-%s", os.Getpid(), hex.EncodeToString(sum[:6]))
+}
+
+func startBackfillLeaseHeartbeat(ctx context.Context, st *store.Store, ownerToken string, errOut io.Writer) func() {
+	hbCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(backfillLeaseHeartbeatTick)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-hbCtx.Done():
+				return
+			case <-ticker.C:
+				ok, err := st.RefreshMaintenanceLease(hbCtx, backfillLeaseName, ownerToken, time.Now().UTC())
+				if err != nil {
+					if errOut != nil {
+						fmt.Fprintf(errOut, "warning: maintenance lease heartbeat failed: %v\n", err)
+					}
+					return
+				}
+				if !ok {
+					if errOut != nil {
+						fmt.Fprintln(errOut, "warning: maintenance lease lost during backfill")
+					}
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+func runTargetedRepairRescan(ctx context.Context, configPath string, st *store.Store, adapterName, tool, repairKey string, repairVersion int) (watcher.ScanResult, int, error) {
+	var empty watcher.ScanResult
+	candidates, err := st.ListRepairCandidateFiles(ctx, tool, repairKey, repairVersion)
+	if err != nil {
+		return empty, 0, err
+	}
+	if len(candidates) == 0 {
+		return empty, 0, nil
+	}
+	w, cleanup, err := buildWatcherWithOverride(ctx, configPath, adapterName)
+	if err != nil {
+		return empty, len(candidates), err
+	}
+	defer cleanup()
+	res, err := w.RescanPaths(ctx, candidates)
+	if err != nil {
+		return res, len(candidates), err
+	}
+	if err := st.MarkRepairAppliedBatch(ctx, tool, repairKey, repairVersion, res.ProcessedPaths); err != nil {
+		return res, len(candidates), err
+	}
+	return res, len(candidates), nil
 }
 
 // backfillIsSidechain walks every *.jsonl under projectsDir, extracts
