@@ -332,6 +332,7 @@ ON CONFLICT(source_file, source_event_id) DO UPDATE SET
 		THEN excluded.duration_ms
 		ELSE actions.duration_ms
 	END,
+	message_id = COALESCE(NULLIF(excluded.message_id, ''), actions.message_id),
 	metadata = CASE
 		WHEN excluded.metadata IS NOT NULL AND actions.metadata IS NULL
 		THEN excluded.metadata
@@ -652,6 +653,7 @@ func (s *Store) InsertTokenEvents(ctx context.Context, events []models.TokenEven
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(source_file, source_event_id) DO UPDATE SET
 		model = COALESCE(NULLIF(excluded.model, ''), token_usage.model),
+		message_id = COALESCE(NULLIF(excluded.message_id, ''), token_usage.message_id),
 		input_tokens          = MAX(token_usage.input_tokens, excluded.input_tokens),
 		output_tokens         = MAX(token_usage.output_tokens, excluded.output_tokens),
 		cache_read_tokens     = MAX(token_usage.cache_read_tokens, excluded.cache_read_tokens),

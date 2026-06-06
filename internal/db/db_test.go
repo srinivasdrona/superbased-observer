@@ -34,7 +34,8 @@ func TestOpenInMemoryAppliesSchema(t *testing.T) {
 		"projects", "sessions", "actions", "file_state",
 		"token_usage", "api_turns", "failure_context",
 		"action_excerpts", "compaction_events", "project_patterns",
-		"observer_log", "parse_cursors",
+		"observer_log", "parse_cursors", "maintenance_leases",
+		"file_ingest_state", "file_repair_versions",
 	} {
 		var name string
 		err := database.QueryRowContext(

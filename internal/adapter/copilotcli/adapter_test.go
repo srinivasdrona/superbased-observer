@@ -191,6 +191,101 @@ func TestParseProcessLog_DebugUsage(t *testing.T) {
 	}
 }
 
+// TestParseProcessLog_ModelFromResponseBlockWithoutDefaultModel pins that
+// Tier-1 rows can still resolve model attribution when the process log lacks
+// `[INFO] Using default model: ...` but the debug response JSON includes
+// a model field.
+func TestParseProcessLog_ModelFromResponseBlockWithoutDefaultModel(t *testing.T) {
+	dir := t.TempDir()
+	logsRoot := filepath.Join(dir, ".copilot", "logs")
+	if err := os.MkdirAll(logsRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(logsRoot, "process-1779010107630-20477.log")
+	body := `2026-05-17T09:28:27.900Z [INFO] Workspace initialized: 9da4aa10-1da9-49a5-931f-f89c2528c6db (checkpoints: 0)
+2026-05-17T10:08:24.316Z [DEBUG] response (Request-ID 00000-model-from-response):
+2026-05-17T10:08:24.316Z [DEBUG] data:
+2026-05-17T10:08:24.316Z [DEBUG] {
+  "id": "abc",
+  "model": "claude-opus-4-7",
+  "usage": {
+    "completion_tokens": 123,
+    "prompt_tokens": 1000,
+    "prompt_tokens_details": {
+      "cached_tokens": 100
+    }
+  }
+}
+`
+	if err := os.WriteFile(log, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewWithOptions(nil, logsRoot)
+	res, err := a.ParseSessionFile(context.Background(), log, 0)
+	if err != nil {
+		t.Fatalf("ParseSessionFile: %v", err)
+	}
+	if len(res.TokenEvents) != 1 {
+		t.Fatalf("TokenEvents = %d, want 1", len(res.TokenEvents))
+	}
+	if got := res.TokenEvents[0].Model; got != "claude-opus-4.7" {
+		t.Errorf("Model = %q, want claude-opus-4.7 (resolved from response JSON model)", got)
+	}
+}
+
+// TestParseProcessLog_ModelFallbackFromSiblingEvents pins the fallback for
+// logs that have neither default-model lines nor per-response model fields:
+// the parser should recover model context from sibling events.jsonl.
+func TestParseProcessLog_ModelFallbackFromSiblingEvents(t *testing.T) {
+	dir := t.TempDir()
+	uuid := "9da4aa10-1da9-49a5-931f-f89c2528c6db"
+	copilotRoot := filepath.Join(dir, ".copilot")
+	logsRoot := filepath.Join(copilotRoot, "logs")
+	sessDir := filepath.Join(copilotRoot, "session-state", uuid)
+	if err := os.MkdirAll(logsRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	events := `{"type":"session.start","data":{"sessionId":"` + uuid + `","selectedModel":"claude-opus-4.7-1m-internal"},"id":"e1","timestamp":"2026-05-17T09:28:27.909Z","parentId":null}` + "\n"
+	if err := os.WriteFile(filepath.Join(sessDir, "events.jsonl"), []byte(events), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	log := filepath.Join(logsRoot, "process-1779010107630-20477.log")
+	body := `2026-05-17T09:28:27.900Z [INFO] Workspace initialized: 9da4aa10-1da9-49a5-931f-f89c2528c6db (checkpoints: 0)
+2026-05-17T10:08:24.316Z [DEBUG] response (Request-ID 00000-model-from-events):
+2026-05-17T10:08:24.316Z [DEBUG] data:
+2026-05-17T10:08:24.316Z [DEBUG] {
+  "id": "abc",
+  "usage": {
+    "completion_tokens": 123,
+    "prompt_tokens": 1000,
+    "prompt_tokens_details": {
+      "cached_tokens": 100
+    }
+  }
+}
+`
+	if err := os.WriteFile(log, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewWithOptions(nil, logsRoot)
+	res, err := a.ParseSessionFile(context.Background(), log, 0)
+	if err != nil {
+		t.Fatalf("ParseSessionFile: %v", err)
+	}
+	if len(res.TokenEvents) != 1 {
+		t.Fatalf("TokenEvents = %d, want 1", len(res.TokenEvents))
+	}
+	if got := res.TokenEvents[0].Model; got != "claude-opus-4.7-1m-internal" {
+		t.Errorf("Model = %q, want claude-opus-4.7-1m-internal (resolved from sibling events.jsonl)", got)
+	}
+}
+
 // TestParseProcessLog_HexOpaqueRequestID pins the v1.6.8 B3 fix:
 // Copilot CLI's debug log emits `[DEBUG] response (Request-ID …)`
 // headers using TWO distinct Request-ID shapes. The dominant shape

@@ -1,0 +1,6 @@
+[observer]
+db_path = 'C:\Users\sdrona\.observer\observer.db'
+log_level = "warn"
+
+[observer.watch]
+enabled_adapters = []

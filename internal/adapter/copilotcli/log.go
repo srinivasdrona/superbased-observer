@@ -52,6 +52,7 @@ var (
 	reWorkspaceInit = regexp.MustCompile(`\[INFO\] Workspace initialized: ([0-9a-f-]{36})`)
 	reDefaultModel  = regexp.MustCompile(`\[INFO\] Using default model: (\S+)`)
 	reUtilization   = regexp.MustCompile(`\[INFO\] CompactionProcessor: Utilization [\d.]+% \((\d+)/(\d+) tokens\)`)
+	reResponseModel = regexp.MustCompile(`^\s*"model":\s*"([^"]+)"`)
 	// reResponseHdr matches the `[DEBUG] response (Request-ID …):`
 	// header that opens each Tier-1 usage block. Empirically Copilot
 	// CLI emits Request-IDs in TWO distinct formats interleaved in the
@@ -111,6 +112,7 @@ type usageAccum struct {
 	total      int64
 	cached     int64
 	reasoning  int64
+	model      string
 	ts         time.Time
 }
 
@@ -196,6 +198,12 @@ func (a *Adapter) parseProcessLog(_ context.Context, path string, fromOffset int
 	// without this the log-parser-only path silently drops every
 	// upserted token row (Tier 1 then never lands in DB).
 	projectRoot, branch := resolveProjectFromSibling(path, st.sessionID)
+	// Some process logs never emit `[INFO] Using default model: ...`.
+	// When that happens, fall back to sibling events.jsonl state so Tier-1
+	// rows don't land as unknown-model.
+	if st.model == "" {
+		st.model = resolveModelFromSiblingEvents(path, st.sessionID)
+	}
 
 	// Set SessionID / Model / ProjectRoot / GitBranch on emitted events.
 	for i := range out.TokenEvents {
@@ -308,7 +316,7 @@ func processLogLine(st *logParserState, line string, ts time.Time, path string, 
 		st.sessionID = m[1]
 	}
 	if m := reDefaultModel.FindStringSubmatch(line); m != nil && st.model == "" {
-		st.model = m[1]
+		st.model = normalizeResponseModelCandidate(m[1])
 	}
 	if m := reUtilization.FindStringSubmatch(line); m != nil {
 		v, _ := strconv.ParseInt(m[1], 10, 64)
@@ -394,6 +402,14 @@ func processLogLine(st *logParserState, line string, ts time.Time, path string, 
 		v, _ := strconv.ParseInt(m[1], 10, 64)
 		st.currentUsage.reasoning = v
 	}
+	if m := reResponseModel.FindStringSubmatch(line); m != nil {
+		if model := normalizeResponseModelCandidate(m[1]); model != "" {
+			st.currentUsage.model = model
+			if st.model == "" {
+				st.model = model
+			}
+		}
+	}
 
 	// braceDepth back to 0 after we've seen content — block done.
 	if st.braceDepth <= 0 && st.currentUsage.hasAny() {
@@ -429,12 +445,16 @@ func emitTokenEvent(st *logParserState, path string, out *adapter.ParseResult) {
 	if netInput < 0 {
 		netInput = 0
 	}
+	model := st.currentUsage.model
+	if model == "" {
+		model = st.model
+	}
 	out.TokenEvents = append(out.TokenEvents, models.TokenEvent{
 		SourceFile:      path,
 		SourceEventID:   fmt.Sprintf("log:%s:%d", st.currentRequestID, seq),
 		Timestamp:       st.currentUsage.ts,
 		Tool:            models.ToolCopilotCLI,
-		Model:           st.model,
+		Model:           model,
 		InputTokens:     netInput,
 		OutputTokens:    st.currentUsage.completion,
 		CacheReadTokens: st.currentUsage.cached,
@@ -443,6 +463,68 @@ func emitTokenEvent(st *logParserState, path string, out *adapter.ParseResult) {
 		Reliability:     models.ReliabilityApproximate,
 		MessageID:       st.currentRequestID,
 	})
+}
+
+func normalizeResponseModelCandidate(raw string) string {
+	model := strings.TrimSpace(raw)
+	if model == "" || strings.EqualFold(model, "auto") {
+		return ""
+	}
+	switch {
+	case strings.HasPrefix(model, "capi:"):
+		model = strings.TrimPrefix(model, "capi:")
+	case strings.HasPrefix(model, "sweagent-capi:"):
+		model = strings.TrimPrefix(model, "sweagent-capi:")
+	}
+	if i := strings.Index(model, ":"); i > 0 {
+		model = model[:i]
+	}
+	if model == "claude-opus-4-7" {
+		return "claude-opus-4.7"
+	}
+	return model
+}
+
+func resolveModelFromSiblingEvents(logPath, sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	copilotRoot := filepath.Dir(filepath.Dir(logPath))
+	eventsPath := filepath.Join(copilotRoot, "session-state", sessionID, "events.jsonl")
+	f, err := os.Open(eventsPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	st := &parserState{
+		sessionID:        sessionID,
+		toolCalls:        map[string]toolExecutionStartData{},
+		permRequests:     map[string]permissionRequestedData{},
+		systemHashesSeen: map[string]bool{},
+		subagentModels:   map[string]string{},
+	}
+	br := bufio.NewReader(f)
+	for {
+		line, readErr := br.ReadString('\n')
+		clean := strings.TrimRight(line, "\r\n")
+		if clean != "" {
+			env, perr := decodeEnvelope(clean)
+			if perr == nil {
+				dispatchState(st, env, nil)
+			}
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				if !strings.HasSuffix(line, "\n") && !strings.HasSuffix(line, "\r\n") {
+					return st.model
+				}
+				break
+			}
+			return ""
+		}
+	}
+	return st.model
 }
 
 // parseLineTimestamp pulls the ISO timestamp prefix from a log line.
