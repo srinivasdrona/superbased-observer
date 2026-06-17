@@ -1,0 +1,17 @@
+[observer]
+  db_path = "/tmp/ab-gsm8k/off/observer.db"
+  log_level = "info"
+  [observer.watch]
+    enabled_adapters = []
+
+[proxy]
+  enabled = true
+  port = 8831
+  openai_upstream = "https://ai-shinof1261ai979822964896.cognitiveservices.azure.com/openai/deployments/Kimi-K2.6"
+
+[compression.shell]
+  enabled = false
+[compression.indexing]
+  enabled = false
+[compression.conversation]
+  enabled = false

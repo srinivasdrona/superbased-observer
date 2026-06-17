@@ -1,0 +1,5 @@
+{"idx": 1, "arm": "on", "correct": false, "latency_ms": 1602.8, "prompt_tokens": 86, "completion_tokens": 128, "total_tokens": 214, "gold": "18", "pred": "", "raw": ""}
+{"idx": 2, "arm": "on", "correct": true, "latency_ms": 661.1, "prompt_tokens": 49, "completion_tokens": 94, "total_tokens": 143, "gold": "3", "pred": "3", "raw": "3"}
+{"idx": 3, "arm": "on", "correct": false, "latency_ms": 1046.9, "prompt_tokens": 72, "completion_tokens": 128, "total_tokens": 200, "gold": "70000", "pred": "", "raw": ""}
+{"idx": 4, "arm": "on", "correct": false, "latency_ms": 1092.2, "prompt_tokens": 57, "completion_tokens": 128, "total_tokens": 185, "gold": "540", "pred": "James runs 3 sprints per session, 3 sessions per week, with each sprint being 60 meters.\n\n3 × 3 × 60 =", "raw": "James runs 3 sprints per session, 3 sessions per week, with each sprint being 60 meters.\n\n3 × 3 × 60 ="}
+{"idx": 5, "arm": "on", "correct": false, "latency_ms": 1592.2, "prompt_tokens": 130, "completion_tokens": 128, "total_tokens": 258, "gold": "20", "pred": "", "raw": ""}

@@ -1,0 +1,38 @@
+{
+  "off": {
+    "n": 500,
+    "correct": 416,
+    "accuracy": 0.832,
+    "avg_latency_ms": 2111.6802000000002,
+    "p50_latency_ms": 1403.9,
+    "p95_latency_ms": 5969.1,
+    "p99_latency_ms": 14774.7,
+    "avg_prompt_tokens": 92.764,
+    "avg_total_tokens": 311.096,
+    "avg_prompt_bytes": 235.07,
+    "avg_response_bytes": 277.376,
+    "total_prompt_tokens": 46382,
+    "total_completion_tokens": 109166,
+    "total_tokens": 155548,
+    "total_prompt_bytes": 117535,
+    "total_response_bytes": 138688
+  },
+  "on": {
+    "n": 500,
+    "correct": 421,
+    "accuracy": 0.842,
+    "avg_latency_ms": 2061.416199999999,
+    "p50_latency_ms": 1270.8,
+    "p95_latency_ms": 5990.5,
+    "p99_latency_ms": 16048.0,
+    "avg_prompt_tokens": 92.764,
+    "avg_total_tokens": 308.32,
+    "avg_prompt_bytes": 235.07,
+    "avg_response_bytes": 255.782,
+    "total_prompt_tokens": 46382,
+    "total_completion_tokens": 107778,
+    "total_tokens": 154160,
+    "total_prompt_bytes": 117535,
+    "total_response_bytes": 127891
+  }
+}
