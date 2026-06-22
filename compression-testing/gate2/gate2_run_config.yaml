@@ -1,0 +1,90 @@
+# Gate 2 Run Configuration
+# All parameters for Gate 2.1 baseline run (Arm OFF + Arm ON-FULL)
+# Referenced by: run_gate2_*.sh, GATE2_PRE_REGISTRATION.md §2
+
+# Model Configuration
+model:
+  deployment_name: "grok-4.3"  # Changed from gpt-5.3-codex due to Azure API "incomplete" errors
+  api_version: "2024-10-21"
+  backend: "azure_codex"  # Uses azure_responses.py adapter
+  temperature: 0.0
+  reasoning_effort: null  # Grok doesn't accept reasoning.effort parameter
+  max_tokens: 4096
+
+# Retry Configuration
+retries:
+  file_level: 5
+  related_level: 5
+  edit_location: 5
+  repair: 5
+
+# Timeout Configuration (seconds)
+timeouts:
+  per_phase: 1800  # 30 minutes per phase
+  per_instance: 7200  # 2 hours total per instance
+
+# Test Set
+test_set:
+  file: "instances_n50.txt"
+  count: 50
+  source: "SWE-bench Verified curated subset"
+
+# Observer Proxy Configuration
+observer:
+  off:
+    port: 8831
+    config_file: "ab-off.toml"
+    db_path: "../../observer-off.db"
+    endpoint_env: "AZURE_OPENAI_ENDPOINT"
+    key_env: "AZURE_OPENAI_API_KEY"
+  on_full:
+    port: 8832
+    config_file: "ab-on.toml"
+    db_path: "../../observer-on.db"
+    endpoint_env: "AZURE_OPENAI_ENDPOINT"
+    key_env: "AZURE_OPENAI_API_KEY"
+
+# Agentless Configuration
+agentless:
+  work_dir: "~/swe-bench-3slot-work"
+  agentless_dir: "~/agentless"
+  results_dir_off: "gate2_off"
+  results_dir_on_full: "gate2_on_full"
+  
+  # Environment files
+  env_file: ".env"
+  env_local_file: ".env.local"
+  
+  # Phases to run (Agentless 4-phase pipeline)
+  phases:
+    - "file_level"
+    - "related_level" 
+    - "edit_location"
+    - "repair"
+  
+  # Additional flags
+  skip_greedy: false  # Run all phases, don't skip to greedy
+  enable_perfect_angelic: false  # No gold-file access
+
+# Output Configuration
+output:
+  log_file: "~/swe-bench-3slot-work/gate2_full.log"
+  verdict_file: "gate2_verdict.json"
+  timestamp_format: "%Y-%m-%d %H:%M:%S"
+
+# Pre-registration Lock
+# These values are locked and must match §0 in GATE2_PRE_REGISTRATION.md
+locked_params:
+  test_set_n: 50
+  model: "gpt-5.3-codex"
+  harness: "Agentless"
+  retries_per_phase: 5
+  compression_mode: "default"  # No target_ratio override
+  min_token_savings_pct: 10
+  max_accuracy_delta_pp: 3
+
+# Freeze Status
+freeze:
+  status: "DRAFT"
+  commit_sha: null
+  freeze_date: null

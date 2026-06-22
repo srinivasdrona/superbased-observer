@@ -45,7 +45,9 @@ Request body → compress-bench (Go, observer pipeline)
 | Gate | Benchmark | Model | n | Status |
 |---|---|---|---|---|
 | Gate 1 | GSM8K (math accuracy) | Kimi-K2.6 / Azure | 100 per level × 8 levels | ✅ Complete |
-| Gate 2 | SWE-bench Verified (code repair) | TBD | ≥ 50 instances × 2 arms | ⏳ Pending Gate 1 pass |
+| Gate 2.1 | SWE-bench Verified (exploratory) | gpt-5.3-codex / Azure | 25 instances × 2 arms | ✅ **PASS** (closed 2026-06-22) |
+| Gate 2.2 | SWE-bench Verified (pre-registered) | gpt-5.3-codex / Azure | 50 instances × 2 arms | 🔲 Ready to run |
+| Gate 2.3+ | SWE-bench Verified (ablation) | gpt-5.3-codex / Azure | 50 instances × 5 arms | ⏳ Conditional on Gate 2.2 PASS |
 
 ---
 
@@ -159,13 +161,40 @@ accuracy impact on GSM8K. Proceed to Gate 2.
 
 ## Gate 2 — SWE-bench Verified
 
-### What
+### Gate 2.1 — Exploratory (CLOSED ✅ PASS, 2026-06-22)
 
-Run SWE-bench Verified instances with a coding agent through two observer
-proxy arms (compression ON vs OFF) and compare:
-- % Resolved (does the agent fix the bug?)
-- Token usage and cost per resolved instance
-- Per-mechanism compression breakdown from observer DB
+**Cohort:** 21 astropy + 4 django (25 instances × 2 arms) — exploratory, not pre-registered  
+**Agent:** SWE-agent 1.1.0 | **Model:** gpt-5.3-codex via Azure
+
+| Metric | OFF | ON | Gate |
+|--------|-----|----|------|
+| Resolve rate | 10/25 (40%) | 10/25 (40%) | ✅ 0pp delta |
+| Input token savings | 1,521,673 | 1,325,101 | ✅ **−12.9%** |
+| Cost per resolved | $0.311 | $0.278 | ✅ ON cheaper |
+| Byte savings | — | **40.2%** | ✅ |
+| Turn count delta | 291 | 308 | ✅ +5.8% (<10%) |
+
+**Layer breakdown (ON arm):**
+
+| Layer | Mechanism | Events | Saved bytes | Share |
+|-------|-----------|--------|-------------|-------|
+| L3 | Stash | 269 | 3,503,988 | 89.3% |
+| L1 | Logs | 440 | 370,669 | 9.4% |
+| L1 | Code | 318 | 8,359 | 0.2% |
+| L2 | Budget-drop | 0 | 0 | 0% |
+
+**Full verdict:** `gate2/GATE2_1_VERDICT.md`
+
+---
+
+### Gate 2.2 — Pre-registered Balanced Cohort (🔲 READY TO RUN)
+
+**Cohort:** `gate2_2_subset_balanced_n50.txt` — 50 instances, 10 repos, 98% multi-file  
+**Agent:** SWE-agent 1.1.0 | **Model:** gpt-5.3-codex via Azure  
+**Cohort file:** `E:\swe-bench-3slot\artifacts\gate2_2_subset_balanced_n50.txt`
+
+Pre-flight steps required (new repos to clone): sympy, sphinx, pylint, xarray, matplotlib, pytest, scikit-learn, seaborn  
+See `gate2/GATE2_PRE_REGISTRATION.md §14.3` for checklist.
 
 ### Why SWE-bench Verified
 

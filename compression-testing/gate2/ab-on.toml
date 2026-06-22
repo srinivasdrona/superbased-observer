@@ -1,0 +1,57 @@
+# Observer Proxy Configuration — Arm ON (compression enabled)
+# Gate 2: SWE-bench Verified compression testing
+# Port: 8832 (ON arm, full compression)
+
+[observer]
+db_path = "E:\\superbased-observer\\compression-testing\\gate2\\observer-on.db"
+log_level = "info"
+
+[observer.watch]
+enabled_adapters = []
+
+[proxy]
+enabled = true
+bind_address = "0.0.0.0"
+port = 8832
+openai_upstream = "https://ai-shinof1261ai979822964896.cognitiveservices.azure.com"
+
+[profiles.by_provider]
+openai = "default"
+
+[compression.shell]
+enabled = true
+exclude_commands = [
+    "curl",
+    "playwright",
+    "rg",
+    "ripgrep",
+    "grep",
+    "cat",
+    "type",
+    "Get-Content",
+    "head",
+    "tail",
+    "less",
+    "more",
+]
+
+[compression.indexing]
+enabled = true
+max_excerpt_bytes = 16384
+
+[compression.conversation]
+enabled = true
+mode = "cache_aware"
+compress_types = ["json", "logs", "code", "tools"]
+preserve_last_n = 5
+
+[compression.conversation.logs]
+max_lines = 200
+head = 20
+tail = 20
+
+[compression.conversation.stash]
+enabled = true
+dir = "E:\\superbased-observer\\compression-testing\\gate2\\stash-on"
+threshold_bytes = 8192
+max_total_mb = 1024
