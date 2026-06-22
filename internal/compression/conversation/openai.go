@@ -269,7 +269,22 @@ func openaiResponsesExtract(body []byte) (envelope map[string]json.RawMessage, e
 			}
 			em.compressionText = em.outputString
 		} else {
-			em.compressionText = em.flatText
+			// V7-X: litellm (and some other clients) emit `output` as a
+			// content-part array ([{"type":"input_text","text":"..."}])
+			// rather than a plain string. parseOpenAITextContent handles
+			// both shapes — try it as a fallback so tool results from
+			// these clients still receive a non-empty compressionText.
+			_, _, outputFlat := parseOpenAITextContent(obj["output"])
+			if outputFlat != "" {
+				if em.flatText != "" {
+					em.flatText += "\n" + outputFlat
+				} else {
+					em.flatText = outputFlat
+				}
+				em.compressionText = outputFlat
+			} else {
+				em.compressionText = em.flatText
+			}
 		}
 		em.isToolResult = em.role == "tool" ||
 			em.itemType == "function_call_output" ||
@@ -749,6 +764,9 @@ func rewriteOpenAIResponseContent(em *openaiResponsesExtractedMessage, compresse
 	if err := json.Unmarshal(em.raw, &obj); err != nil {
 		return nil, err
 	}
+	// When the original had an `output` field (string or array) — always
+	// write back as a plain string. Azure Responses API accepts string output
+	// for function_call_output regardless of the original shape.
 	if em.outputString != "" {
 		outputBytes, err := json.Marshal(compressed)
 		if err != nil {
@@ -757,6 +775,17 @@ func rewriteOpenAIResponseContent(em *openaiResponsesExtractedMessage, compresse
 		obj["output"] = outputBytes
 		return marshalEnvelope(obj)
 	}
+	// V7-X: litellm emits output as an array; em.outputString is "" but
+	// obj["output"] still holds the large array. Replace with plain string.
+	if _, hasOutput := obj["output"]; hasOutput {
+		outputBytes, err := json.Marshal(compressed)
+		if err != nil {
+			return nil, err
+		}
+		obj["output"] = outputBytes
+		return marshalEnvelope(obj)
+	}
+	// Fallback for items with a content field rather than output.
 	var contentBytes []byte
 	var err error
 	if len(em.contentParts) > 0 {
