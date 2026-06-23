@@ -319,41 +319,54 @@ def build_predictions_jsonl(results: list[dict], out_path: Path) -> int:
 
 def run_harness_wsl(predictions_path: Path, run_id: str, max_workers: int = 4) -> dict | None:
     """
-    Invoke swebench.harness.run_evaluation from WSL as root (Docker required).
+    Invoke swebench.harness.run_evaluation (Docker required).
+    Detects if we're already inside WSL/Linux and calls directly;
+    otherwise falls back to wsl -u root -e (Windows host invocation).
     Returns the parsed report dict or None on failure.
     """
-    # Convert Windows path to WSL path
-    wsl_pred = "/mnt/" + str(predictions_path).replace("\\", "/").replace(":", "").lower()
-    wsl_pred = wsl_pred.replace("/mnt/e/", "/mnt/e/")  # normalise
+    import platform
+    inside_wsl = platform.system() == "Linux"
 
-    cmd = [
-        "wsl", "-u", "root", "-e",
-        SWEBENCH_VENV_PY, "-m", "swebench.harness.run_evaluation",
-        "--predictions_path", wsl_pred,
-        "--swe_bench_tasks", "princeton-nlp/SWE-bench_Verified",
-        "--split", "test",
-        "--max_workers", str(max_workers),
-        "--run_id", run_id,
-    ]
+    if inside_wsl:
+        # Already in WSL — call python directly (runner is root, docker is available)
+        cmd = [
+            sys.executable, "-m", "swebench.harness.run_evaluation",
+            "-p", str(predictions_path),
+            "-d", "princeton-nlp/SWE-bench_Verified",
+            "-s", "test",
+            "--max_workers", str(max_workers),
+            "--report_dir", str(predictions_path.parent),
+            "-id", run_id,
+        ]
+    else:
+        # Running on Windows — route through WSL
+        wsl_pred = "/mnt/" + str(predictions_path).replace("\\", "/").replace(":", "").lower()
+        wsl_report_dir = "/mnt/" + str(predictions_path.parent).replace("\\", "/").replace(":", "").lower()
+        cmd = [
+            "wsl", "-u", "root", "-e",
+            SWEBENCH_VENV_PY, "-m", "swebench.harness.run_evaluation",
+            "-p", wsl_pred,
+            "-d", "princeton-nlp/SWE-bench_Verified",
+            "-s", "test",
+            "--max_workers", str(max_workers),
+            "--report_dir", wsl_report_dir,
+            "-id", run_id,
+        ]
+
     logger.info(f"  Running harness: run_id={run_id}")
     result = subprocess.run(cmd, capture_output=False)
     if result.returncode != 0:
         logger.warning(f"  Harness returned exit {result.returncode}")
 
-    # Report lands at CWD/<MODEL_NAME>.<run_id>.json
+    # Report lands in predictions_path.parent (we passed --report_dir there)
     report_name = f"{MODEL_NAME}.{run_id}.json"
-    report_path = Path(".") / report_name
-    if not report_path.exists():
-        # Also check next to predictions file
-        alt_path = predictions_path.parent / report_name
-        if alt_path.exists():
-            report_path = alt_path
-        else:
-            logger.warning(f"  Harness report not found: {report_name}")
-            return None
+    for candidate in [predictions_path.parent / report_name, Path(".") / report_name]:
+        if candidate.exists():
+            with candidate.open() as fh:
+                return json.load(fh)
 
-    with report_path.open() as fh:
-        return json.load(fh)
+    logger.warning(f"  Harness report not found: {report_name}")
+    return None
 
 
 # ── State checkpoint ─────────────────────────────────────────────────────────

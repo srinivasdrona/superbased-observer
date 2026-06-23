@@ -11,14 +11,19 @@ import (
 
 // providerForPath routes a request path to the upstream provider. Anthropic's
 // Messages API lives under /v1/messages; everything else under /v1 (chat
-// completions, responses, embeddings, models) goes to OpenAI. The default is
-// anthropic — Claude Code sets ANTHROPIC_BASE_URL to the root of the proxy
-// and hits paths that don't always begin with /v1 (e.g. health probes).
+// completions, responses, embeddings, models) goes to OpenAI. Azure OpenAI
+// Responses API uses /openai/* paths (not /v1/*) and also routes to OpenAI.
+// The default is anthropic — Claude Code sets ANTHROPIC_BASE_URL to the root
+// of the proxy and hits paths that don't always begin with /v1 (e.g. health probes).
 func providerForPath(path string) string {
 	if strings.HasPrefix(path, "/v1/messages") {
 		return models.ProviderAnthropic
 	}
 	if isChatGPTBackendPath(path) {
+		return models.ProviderOpenAI
+	}
+	// Azure OpenAI Responses API support (Gate 2 compression testing)
+	if strings.HasPrefix(path, "/openai/") {
 		return models.ProviderOpenAI
 	}
 	if strings.HasPrefix(path, "/v1/chat/completions") ||
