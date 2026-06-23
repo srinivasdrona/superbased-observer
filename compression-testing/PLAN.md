@@ -196,7 +196,7 @@ accuracy impact on GSM8K. Proceed to Gate 2.
 - **Repetitions:** 3 per instance per arm → 300 runs/arm, 600 runs total
 - **Arms:** OFF (port 8831, compression disabled) / ON (port 8832, compression enabled)
 - **Batch execution:** 5 batches of 10 instances each; run harness after each batch
-- **Retry policy:** retry only infra failures (empty patch / `exit_status=error`, up to 10 retries); resolution failures are valid data points — do NOT retry
+- **Retry policy:** retry until agent produces a non-empty submitted patch (up to 10 attempts per instance per rep); once a patch is submitted the docker harness runs once — harness verdict is final, no re-runs on resolution status
 - **Bug fix:** `git clean -fdxq` → `git clean -fdq` already applied in runner
 
 **Primary metrics:**
