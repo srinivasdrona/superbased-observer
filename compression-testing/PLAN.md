@@ -46,7 +46,7 @@ Request body → compress-bench (Go, observer pipeline)
 |---|---|---|---|---|
 | Gate 1 | GSM8K (math accuracy) | Kimi-K2.6 / Azure | 100 per level × 8 levels | ✅ Complete |
 | Gate 2.1 | SWE-bench Verified (exploratory) | gpt-5.3-codex / Azure | 25 instances × 2 arms | ✅ **PASS** (closed 2026-06-22) |
-| Gate 2.2 | SWE-bench Verified (pre-registered) | gpt-5.3-codex / Azure | 50 instances × 2 arms | 🔲 Ready to run |
+| Gate 2.2 | SWE-bench Verified (pre-registered) | gpt-5.3-codex / Azure | 50 instances × 2 arms | ✅ **PASS** (closed 2026-06-23) |
 | Gate 2.3+ | SWE-bench Verified (ablation) | gpt-5.3-codex / Azure | 50 instances × 5 arms | ⏳ Conditional on Gate 2.2 PASS |
 
 ---

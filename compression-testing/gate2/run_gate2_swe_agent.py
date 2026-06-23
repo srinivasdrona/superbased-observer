@@ -34,10 +34,13 @@ def _patched_get_reset(self):
     for c in cmds:
         if c.startswith("git fetch"):
             continue
-        # Insert git clean -fdxq before git checkout so untracked files
-        # at current HEAD don't block the checkout to an older base commit.
+        # Insert git clean -fdq before git checkout so untracked files at current
+        # HEAD don't block the checkout to an older base commit.
+        # NOTE: -x (remove ignored files) is intentionally omitted — it causes
+        # exit 1 on NTFS-mounted repos via WSL2 (path-length / permission errors
+        # on __pycache__ and compiled artefacts in blobless-cloned repos).
         if c.startswith("git checkout"):
-            result.append("git clean -fdxq")
+            result.append("git clean -fdq")
         result.append(c)
     return result
 PreExistingRepoConfig.get_reset_commands = _patched_get_reset
@@ -58,7 +61,8 @@ PROXY_HOST = os.environ.get("PROXY_HOST", "localhost")
 
 # Gate 2.2 — balanced n=50 cohort (gate2_2_subset_balanced_n50.txt)
 # seed=20260622, 10 repos, 98% multi-file
-PILOT_INSTANCES = [
+# --- RAMP CONTROL: set to 2 → 10 → 25 → 50 ---
+_ALL_INSTANCES = [
     "astropy__astropy-13398",
     "astropy__astropy-14369",
     "astropy__astropy-8707",
@@ -110,6 +114,8 @@ PILOT_INSTANCES = [
     "sympy__sympy-20438",
     "sympy__sympy-22080",
 ]
+
+PILOT_INSTANCES = _ALL_INSTANCES  # n=50 full cohort
 
 BASE_COMMITS = {
     "astropy__astropy-13398": "6500928dc0e57be8f06d1162eacc3ba5e2eff692",
