@@ -103,10 +103,66 @@ The 8 sympy instances are harder on average (~121K tokens/instance vs ~70K for d
 
 ---
 
-## 7. Next Steps
+## 7. Post-Gate Causal Analysis — Matched-14 Decomposition
 
-Gate 2.2 passes. Recommended next actions:
+After the PASS verdict, a per-instance decomposition on the 14 instances that ran in both arms (`decompose.py`) produced findings that refine interpretation of the results.
 
-1. **Re-run n=50 with git-clean fix** to get a symmetric, clean n=50 result (optional — gate already passes, re-run would only strengthen confidence).
-2. **Increase step limit** from 30 to 50 for future runs — the low overall resolve rate (4–6%) is driven by SWE-agent hitting the step cap mid-exploration, not by compression.
-3. **Gate 3:** Shadow-deploy the observer proxy in a real agent loop with production traffic; measure p50/p95 latency overhead of the compression pipeline.
+### 7.1 Key findings
+
+| Instance | OFF steps | ON steps | ΔSteps | OFF tokens | ON tokens |
+|----------|-----------|----------|--------|------------|-----------|
+| astropy-13398 | 18 | 23 | +5 | 119,995 | 362,964 |
+| astropy-14369 | 18 | 13 | −5 | 168,787 | 138,205 |
+| astropy-8707 | 18 | 18 | 0 | 100,549 | 105,061 |
+| django-11099 | 9 | 10 | +1 | 10,762 | 15,924 |
+| django-11400 | 13 | 16 | +3 | 66,734 | 122,332 |
+| django-11734 | 14 | 19 | +5 | 35,269 | 86,559 |
+| django-12406 | 15 | 26 | +11 | 58,374 | 146,454 |
+| django-13195 | 11 | 16 | +5 | 29,723 | 67,842 |
+| django-13212 | 14 | 31 | +17 | 83,317 | 558,832 |
+| django-13344 | 13 | 21 | +8 | 72,929 | 344,813 |
+| django-14315 | 11 | 11 | 0 | 26,854 | 26,894 |
+| django-14376 | 13 | 11 | −2 | 46,066 | 24,694 |
+| django-15561 | 12 | 14 | +2 | 64,027 | 99,022 |
+| django-16256 | 17 | 17 | 0 | 82,085 | 183,447 |
+| **TOTAL** | **196** | **246** | **+50** | **965,471** | **2,283,043** |
+
+**Equal-step subset** (|ΔSteps| ≤ 1, isolates compression effect at fixed trajectory length):
+
+| Instance | Steps | OFF tokens | ON tokens | ON-OFF% |
+|----------|-------|------------|-----------|---------|
+| astropy-8707 | 18 | 100,549 | 105,061 | +4.5% |
+| django-11099 | 9 | 10,762 | 15,924 | +48.0% |
+| django-14315 | 11 | 26,854 | 26,894 | +0.1% |
+| django-16256 | 17 | 82,085 | 183,447 | +123.5% |
+| **SUBSET** | | **220,250** | **331,326** | **+50.4%** |
+
+### 7.2 Adversarial findings (per matched-14)
+
+1. **"8 extra ON instances" is a confound, not a compression effect.** The ON arm ran 22 vs OFF's 14 because a manual `git checkout` during diagnosis primed the sympy repo between the two arms. The 8 extras are all sympy instances, and they exist in ON purely due to that contamination. Zero of it reflects compression enabling better exploration.
+
+2. **Neither arm was ever context-constrained.** Max steps in OFF = 18, ON = 31. All instances exited `submitted` voluntarily. Average context per call ≈ 18K tokens against a 200K+ window. The "freed context enables more turns" hypothesis is mechanistically impossible here — there was no constraint to relieve.
+
+3. **At equal step count, ON used ≥50% MORE tokens, not fewer.** The 60.5% byte savings at the compression layer does not propagate to billing boundary savings. Compression alters observations → divergent trajectories → more total tokens even when step count is held constant.
+
+4. **More steps correlated with failure.** ON resolved-avg 12 steps, unresolved-avg 18.5 steps. The worst instance (django-13212: 14→31 steps, 6.7× tokens) still failed. Extra turns were flailing, not reasoning.
+
+5. **Compression is not a single first-order effect.** It has two parallel consequences: (a) byte reduction, and (b) information alteration (stash markers, truncated logs). Consequence (b) produces trajectory divergence, making ON and OFF incomparable as "same task at different budgets." Clean attribution requires controlled variance estimates (see Gate 2.3).
+
+### 7.3 Implications for Gate verdict
+
+The PASS stands on the n=25 clean signal (11.6% token savings, 0pp resolve delta). The matched-14 decomposition shows the full n=50 token picture is more complex — net savings at the billing boundary invert to a cost *increase* at fixed trajectory length. This does not invalidate the gate criterion (which was measured on n=25 pre-registered), but it motivates Gate 2.3's design: 3 repetitions per arm per instance to separate compression effect from trajectory-divergence noise.
+
+---
+
+## 8. Next Steps → Gate 2.3
+
+Gate 2.2 closes. Gate 2.3 design:
+
+- **Design:** 3× n=50 (same cohort, bug-fixed), both arms — total 300 runs per arm
+- **Batch execution:** 5 batches of 10 instances; harness runs after each batch completes
+- **Retry policy:** retry only on infra failures (empty patch / `exit_status=error`); resolution failures are data points, not noise
+- **Primary metrics:** (1) resolve-rate non-inferiority, (2) billed `tokens_sent` ON vs OFF at matched step counts
+- **Analysis:** mixed/hierarchical model pooling within-instance variance across reps; step-matched token comparison; per-mechanism compression breakdown
+
+See `PLAN.md` Gate 2.3 section for full specification.

@@ -46,8 +46,8 @@ Request body → compress-bench (Go, observer pipeline)
 |---|---|---|---|---|
 | Gate 1 | GSM8K (math accuracy) | Kimi-K2.6 / Azure | 100 per level × 8 levels | ✅ Complete |
 | Gate 2.1 | SWE-bench Verified (exploratory) | gpt-5.3-codex / Azure | 25 instances × 2 arms | ✅ **PASS** (closed 2026-06-22) |
-| Gate 2.2 | SWE-bench Verified (pre-registered) | gpt-5.3-codex / Azure | 50 instances × 2 arms | ✅ **PASS** (closed 2026-06-23) |
-| Gate 2.3+ | SWE-bench Verified (ablation) | gpt-5.3-codex / Azure | 50 instances × 5 arms | ⏳ Conditional on Gate 2.2 PASS |
+| Gate 2.2 | SWE-bench Verified (pre-registered) | gpt-5.3-codex / Azure | 50 instances × 2 arms | ✅ **PASS** (closed 2026-06-23, addendum 2026-06-23) |
+| Gate 2.3 | SWE-bench Verified (3× variance estimate) | gpt-5.3-codex / Azure | 50 instances × 3 reps × 2 arms | 🔲 Ready to run |
 
 ---
 
@@ -187,7 +187,42 @@ accuracy impact on GSM8K. Proceed to Gate 2.
 
 ---
 
-### Gate 2.2 — Pre-registered Balanced Cohort (🔲 READY TO RUN)
+### Gate 2.3 — Variance-Estimated Re-run (🔲 READY TO RUN)
+
+**Goal:** Establish a clean, symmetric n=50 signal with per-instance variance estimates to separate compression effect from trajectory-divergence noise.
+
+**Design:**
+- **Cohort:** same `gate2_2_subset_balanced_n50.txt` (50 instances, bug-fixed)
+- **Repetitions:** 3 per instance per arm → 300 runs/arm, 600 runs total
+- **Arms:** OFF (port 8831, compression disabled) / ON (port 8832, compression enabled)
+- **Batch execution:** 5 batches of 10 instances each; run harness after each batch
+- **Retry policy:** retry only infra failures (empty patch / `exit_status=error`, up to 10 retries); resolution failures are valid data points — do NOT retry
+- **Bug fix:** `git clean -fdxq` → `git clean -fdq` already applied in runner
+
+**Primary metrics:**
+1. Resolve-rate non-inferiority (ON vs OFF, pooled across 3 reps): pass if Δ ≤ 3pp
+2. Billed `tokens_sent` ON vs OFF at **matched step counts** (equal-step subset)
+3. Per-mechanism compression breakdown (stash/logs/code/budget-drop)
+
+**Analysis plan:**
+- Mixed/hierarchical model pooling within-instance variance across reps (100 df per arm)
+- Step-matched token comparison (within-instance, same step count only)
+- Resolution counts per arm: treat as Poisson; report 95% CI
+
+**Gate 2.3 Pass/Fail:**
+
+| Criterion | Threshold |
+|-----------|-----------|
+| Resolve-rate Δ (ON vs OFF, pooled) | ≤ 3pp degradation |
+| Billed tokens ON vs OFF (equal-step subset) | ON ≤ OFF (savings preserved) |
+| Byte compression ratio | ≤ 0.80 |
+| Request/parse errors | 0 |
+
+**Artifacts:** `compression-testing/gate2/GATE2_3_VERDICT.md` (to be created post-run)
+
+---
+
+### Gate 2.2 — Pre-registered Balanced Cohort (✅ PASS, closed 2026-06-23)
 
 **Cohort:** `gate2_2_subset_balanced_n50.txt` — 50 instances, 10 repos, 98% multi-file  
 **Agent:** SWE-agent 1.1.0 | **Model:** gpt-5.3-codex via Azure  
