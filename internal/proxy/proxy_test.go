@@ -2179,6 +2179,48 @@ func TestParseSSEStream_ChatGPTFixture(t *testing.T) {
 	}
 }
 
+// TestParseOpenAIResponse_ResponsesAPICachedTokens pins the non-streaming
+// /v1/responses parser against the Responses API usage shape, where cached
+// tokens live under input_tokens_details.cached_tokens (NOT
+// prompt_tokens_details). Before the fix, parseOpenAIResponse only read the
+// Chat Completions key, so non-streaming Responses replies logged
+// cache_read_tokens=0 — the gap that left Gate 2.3 cache-blind.
+func TestParseOpenAIResponse_ResponsesAPICachedTokens(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"id":"resp_abc","model":"gpt-5.3-codex","usage":{"input_tokens":6738,"output_tokens":13,"input_tokens_details":{"cached_tokens":5000}}}`)
+	got := parseOpenAIResponse(body)
+	if got.CacheReadTokens != 5000 {
+		t.Errorf("CacheReadTokens = %d, want 5000 (from input_tokens_details.cached_tokens)", got.CacheReadTokens)
+	}
+	if got.InputTokens != 1738 {
+		t.Errorf("InputTokens = %d, want 1738 (6738 gross net of 5000 cached)", got.InputTokens)
+	}
+	if got.OutputTokens != 13 {
+		t.Errorf("OutputTokens = %d, want 13", got.OutputTokens)
+	}
+	if got.RequestID != "resp_abc" {
+		t.Errorf("RequestID = %q, want resp_abc", got.RequestID)
+	}
+}
+
+// TestParseOpenAIResponse_ChatCompletionsCachedTokens is the regression guard
+// for the existing Chat Completions shape (prompt_tokens_details), ensuring the
+// Responses fallback doesn't disturb it.
+func TestParseOpenAIResponse_ChatCompletionsCachedTokens(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"id":"chatcmpl-1","model":"gpt-5","choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":5}}}`)
+	got := parseOpenAIResponse(body)
+	if got.CacheReadTokens != 5 {
+		t.Errorf("CacheReadTokens = %d, want 5", got.CacheReadTokens)
+	}
+	if got.InputTokens != 6 {
+		t.Errorf("InputTokens = %d, want 6 (11 net of 5 cached)", got.InputTokens)
+	}
+	if got.OutputTokens != 3 {
+		t.Errorf("OutputTokens = %d, want 3", got.OutputTokens)
+	}
+}
+
 // TestProxy_ChatGPTSSEWithEmptyContentTypeRoutedToStreamParser pins the
 // SSE content-sniffing fallback wired into serve(). chatgpt.com's
 // /backend-api/codex/responses endpoint returns SSE bodies with an empty

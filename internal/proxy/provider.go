@@ -380,6 +380,9 @@ func parseOpenAIResponse(body []byte) responseShape {
 			PromptTokensDetails struct {
 				CachedTokens int64 `json:"cached_tokens"`
 			} `json:"prompt_tokens_details"`
+			InputTokensDetails struct {
+				CachedTokens int64 `json:"cached_tokens"`
+			} `json:"input_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -390,6 +393,14 @@ func parseOpenAIResponse(body []byte) responseShape {
 		RequestID:       raw.ID,
 		ServiceTier:     raw.ServiceTier,
 		CacheReadTokens: raw.Usage.PromptTokensDetails.CachedTokens,
+	}
+	// The /v1/responses endpoint reports cached tokens under
+	// input_tokens_details.cached_tokens, NOT prompt_tokens_details
+	// (the Chat Completions key). Non-streaming Responses replies
+	// otherwise drop the cache read entirely — the gap that left
+	// Gate 2.3 cache-blind. Mirror parseOpenAIStream, which reads both.
+	if shape.CacheReadTokens == 0 {
+		shape.CacheReadTokens = raw.Usage.InputTokensDetails.CachedTokens
 	}
 	// OpenAI's prompt_tokens / input_tokens is the TOTAL prompt
 	// count INCLUDING cached_tokens (a subset). The cost engine and
