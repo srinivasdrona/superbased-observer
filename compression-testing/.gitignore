@@ -1,0 +1,31 @@
+# Compression-testing data hygiene.
+# Curated text artifacts (VERDICT.md, docs/*.md, scripts/*) are tracked
+# explicitly. Everything below is large, regenerable, or secret and is
+# kept organized on disk but out of git.
+
+# --- Live proxy infrastructure + secrets (gate2/ holds the running A/B) ---
+gate2/.gate2_key
+gate2/observer-*.log
+gate2/observer-*.err
+gate2/observer-*.stdout
+gate2/observer-*.stderr
+
+# --- Dependency clones / working trees (hundreds of MB) ---
+gate2/repos/
+gate2/swe-agent/
+gate2/mini-swe-agent/
+gate2/stash-on/
+
+# --- Per-gate relocated run data (large, regenerable harness output) ---
+gate*/results/runs/
+gate*/results/cohort1/
+gate*/results/legacy_results/
+gate*/results/test_fixed/
+gate*/results/test_phase1/
+gate2.2/results/harness_results/logs/
+gate2.2/results/harness_results/smoke_n2/
+
+# --- Misc large/scratch outputs ---
+*.db
+*.db-wal
+*.db-shm
