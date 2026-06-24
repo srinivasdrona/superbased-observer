@@ -186,4 +186,17 @@ exploratory** (+9.2% turns, 9/10 repos). It is **safe to enable**: it cuts model
 tokens, cost, and footprint at no resolve-rate cost. It does **not**, in this sample,
 convert the freed context into additional resolved instances.
 
+### Three-order bottom line
+
+| Order | Claim | Verdict |
+|-------|-------|---------|
+| **1st — compression works** | payload shrinks at the model boundary | ✅ **Yes** — ON below OFF (4,662 vs 5,473 input tok/turn, −14.8%) |
+| **2nd — it saves tokens / cost** | fewer tokens, lower cost | ✅ **Yes** — −9.1% total model-side input tokens; cheaper in both cost meters (−1% to −6.8%) |
+| **3rd — freed context → more turns → more fixes** | the agent reasons better | ❌ **No** — +9.2% more turns, but 0 extra resolutions (31 vs 32) |
+
+**Net: resolve-neutral (non-inferior, −0.5pp), ~9% token saving, directionally cheaper.**
+The efficiency case holds; the "smarter reasoning" case does not — extra capacity, zero
+extra productivity. The token saving (−9.1%) is the meter-independent hard number; "reduces
+cost" is solid on direction but fuzzy on magnitude (the two cost meters disagree ~3×).
+
 **Gate 2.3: CLOSED — PASS (non-inferior, modest token/cost saving).**
