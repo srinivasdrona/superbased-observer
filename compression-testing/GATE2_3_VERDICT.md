@@ -72,6 +72,33 @@ arms (correct UTC window `[06-23T07:30, 06-24T12:00]`):
   so the meter-independent, robust result is the **token reduction**; the cost direction
   is consistently ON ≤ OFF.
 
+### Retry distribution — why we report both per-turn and total cost
+
+The proxy meter counts patch-retry turns; the trajectory meter counts only the final
+accepted trajectory. Those retries are almost entirely a **batch-1 shakeout** — by batches
+4–5 both arms retry zero times:
+
+| arm | b1 | b2 | b3 | b4 | b5 | total |
+|-----|----|----|----|----|----|-------|
+| ON retries | 153 | 0 | 0 | 0 | 0 | **153** |
+| OFF retries | 169 | 9 | 11 | 0 | 0 | **189** |
+
+So the OFF>ON retry gap (189 vs 153) is **early-run noise, not a compression effect**. That
+is exactly why both cost lenses are worth keeping — they answer different questions:
+
+- **Per-turn (compression's direct lever)** — retry-independent, and price-table-independent
+  in tokens: **−14.8% input tokens/turn (4,662 vs 5,473)**. The cleanest measure of what
+  compression does; it holds even in the retry-free batches 4–5.
+- **Total spend (operational cost)** — retries are real money, so the total *should* include
+  them. ON is cheaper on the total in both meters (−6.8% proxy / −1.0% trajectory), but the
+  cross-arm delta is partly the batch-1 retry artifact, so treat the *magnitude* as soft.
+  Absolute dollars also hinge on a price table that needs reconciling (~$2.1/M proxy vs
+  ~$0.5/M trajectory, implied for gpt-5.3-codex).
+
+For reference, **cost per resolved instance** (total ÷ resolves) is a wash and flips sign by
+meter — ON $0.75 vs OFF $0.78 (proxy) / ON $0.245 vs OFF $0.240 (trajectory) — because ON
+resolved one fewer (31 vs 32), itself inside the noise.
+
 ---
 
 ## 3. Compression mechanism — where the savings come from (complete n=50, all 5 batches)
@@ -169,7 +196,8 @@ measured payoff at this sample size.
    ~$23–25; litellm's trajectory `instance_cost` at ~$7.60–7.68 (~3× apart, different
    price tables for gpt-5.3-codex). Both agree directionally (ON ≤ OFF); the
    meter-independent result is the token reduction. The DB cost also includes patch-retry
-   turns (OFF had more of them), which the trajectory cost excludes.
+   turns (OFF had more of them), which the trajectory cost excludes — almost all in
+   batch 1; by batches 4–5 both arms retry zero times (see §2).
 3. **Single model**: results are specific to gpt-5.3-codex.
 
 (All 5 batches are captured in the observer DB — verified by UTC-windowed turn counts
