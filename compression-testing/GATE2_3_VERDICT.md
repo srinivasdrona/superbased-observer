@@ -1,6 +1,6 @@
 # Gate 2.3 Verdict — Compression Non-Inferiority on SWE-bench Verified
 
-**Date**: 2026-06-24 (revised — corrected token/cost scoping and turn analysis)
+**Date**: 2026-06-24 (revised — full n=50, timezone-corrected DB scoping; token/cost direction updated)
 **Design**: 50 instances × 2 arms (ON/OFF compression) × 3 reps = 300 runs (150 per arm)
 **Model**: azure__gpt-5.3-codex via proxy (ON: port 8832 / OFF: port 8831)
 **Dataset**: SWE-bench Verified (princeton-nlp/SWE-bench_Verified)
@@ -9,10 +9,11 @@
 
 ## Headline
 
-Compression is **non-inferior on resolve rate, cost-neutral, and systematically more
-exploratory — but the extra exploration produced zero extra fixes.** Safe to ship for
-footprint / context-headroom reasons. No measured problem-solving benefit from "freed
-context" in this sample.
+Compression is **non-inferior on resolve rate, modestly cheaper at the model boundary
+(−9% model-side input tokens, lower cost in both meters), and systematically more
+exploratory — but the extra exploration produced zero extra fixes.** Safe to ship: it
+saves model-side tokens/cost and footprint at no resolve-rate cost. No measured
+problem-solving benefit from "freed context" in this sample.
 
 ---
 
@@ -34,46 +35,67 @@ so delta = **0.14 SE — statistically indistinguishable from zero.**
 
 ---
 
-## 2. Tokens, turns, cost (n=50, from trajectory `model_stats`, all 300 runs, 0 missing)
+## 2. Tokens, turns, cost (complete n=50)
+
+Two vantage points, both at full n=50, now reconciled:
+
+**Agent-side (pre-compression)** — from trajectory `model_stats`, all 300 runs:
 
 | Metric | ON | OFF | Δ |
 |--------|-----|------|---|
 | runs | 150 | 150 | — |
-| turns (api_calls) | 2,242 | 2,054 | **+9.2%** |
-| context built / turn (agent-side) | 6,510 | 4,908 | +32.7% |
-| **model-billed cost** | **$7.60** | **$7.68** | **−1.0% (tie)** |
+| turns (api_calls) | 2,242 | 2,054 | +9.2% |
+| context built / turn | 6,510 | 4,908 | +32.7% |
 
-Two vantage points matter and they tell different stories:
+**Model-side (post-compression)** — from the observer DB, all 5 batches, same meter both
+arms (correct UTC window `[06-23T07:30, 06-24T12:00]`):
 
-- **Agent-side (pre-compression)** = what SWE-agent assembles locally. The proxy is
-  transparent, so the agent stores full history in *both* arms. ON's trajectories are
-  heavier per turn (6,510 vs 4,908).
-- **Model-billed (post-compression)** = what Azure actually charges. This is the
-  `instance_cost` above. Here the arms are a **tie ($7.60 vs $7.68)**.
+| Metric | ON | OFF | Δ |
+|--------|-----|------|---|
+| turns (incl. patch retries) | 2,395 | 2,243 | +6.8% |
+| input tokens / turn | **4,662** | **5,473** | **−14.8%** |
+| total input tokens | 11.16M | 12.28M | **−9.1%** |
+| total output tokens | 273.8K | 256.1K | +6.9% |
+| cost (proxy meter, incl. retries) | $23.37 | $25.07 | −6.8% |
+| cost (trajectory meter, final traj) | $7.60 | $7.68 | −1.0% |
 
-The proxy compresses ON's heavier payload back down before the model sees it, so the
-extra agent-side context does **not** flow through to cost. But the freed headroom is
-spent on **+9.2% more turns**, which nets cost back to flat.
+**The mechanism is now clean and complete:**
+
+- The SWE-agent proxy is transparent, so the agent stores full history in *both* arms.
+  ON's trajectories are **heavier** per turn pre-compression (6,510 vs 4,908) — a
+  consequence of running +9.2% more turns and accumulating more history.
+- The proxy compresses ON's payload so that at the model boundary ON is **lighter** than
+  OFF: **4,662 vs 5,473 input tokens/turn (−14.8%)**, and **−9.1% total input tokens**,
+  *even though ON runs more turns*. Compression more than offsets ON's heavier exploration.
+- **Cost is lower for ON in both meters** (−6.8% proxy / −1.0% trajectory). The two meters
+  disagree on absolute magnitude (~3× — different price tables in the proxy vs litellm),
+  so the meter-independent, robust result is the **token reduction**; the cost direction
+  is consistently ON ≤ OFF.
 
 ---
 
-## 3. Compression mechanism — where the savings come from (proxy-side, batches 1–3, 90 ON runs)
+## 3. Compression mechanism — where the savings come from (complete n=50, all 5 batches)
 
-| Mechanism | Events | Per-event saving | Share of all savings |
+Request-level: across 2,395 ON turns the proxy shrank the compressible payload
+**73.1 MB → 49.6 MB = 32.2% reduction.** Mechanism attribution from 9,074 compression
+events:
+
+| Mechanism | Events | Per-event saving | Share of bytes saved |
 |-----------|--------|------------------|----------------------|
-| **stash** | 408 | 98.1% | **93.5%** |
-| logs | 1,688 | 9.1% | 6.1% |
-| code | 998 | 0.4% | 0.4% (effective no-op) |
+| **stash** | 1,712 | 98.1% | **94.0%** |
+| logs | 4,538 | 11.1% | 5.7% |
+| code | 2,824 | 0.4% | 0.3% (effective no-op) |
 
 **Stash (replacing large stale message bodies with markers) does essentially all the
 work.** The per-type `code` compressor is a no-op at this content mix; budget-based
 message dropping never fired (threshold never hit).
 
-> **Correction to prior draft:** the earlier "55.3% byte savings / 88.1 MB / 13,053
-> events" figure was **wrong-scoped** — it summed the entire observer DB, which also
-> contains Gate 2.2 and pre-batch turns back to 06-22. Properly scoped to Gate 2.3, the
-> mechanism breakdown is above. Byte savings are a **proxy-layer** metric and do **not**
-> equal token/cost savings (see §2).
+> **Scoping note:** this breakdown is the full Gate 2.3 run (all 5 batches, correct UTC
+> window). An earlier draft caveated it to "batches 1–3 only" on the belief that the live
+> proxy hadn't checkpointed batches 4–5 — that was a **timezone error** (batch folder
+> names are IST; DB timestamps are UTC). All 5 batches were in the DB the whole time;
+> UTC-windowed turn counts match the trajectories exactly. A separate earlier
+> "55.3% / 88.1 MB" figure was wrong-scoped (it summed Gate 2.2 + pre-batch traffic too).
 
 ---
 
@@ -112,27 +134,30 @@ ON > OFF turns in **every batch** and **every rep**:
 | rep 3 | 755 | 693 | +62 |
 
 This is **systematic and reproducible**. (An earlier note claiming the asymmetry
-"reversed by batch / looked like noise" was an artifact of corrupted observer-DB turn
-counts — 2× undercount plus time-window clipping. Clean trajectory data is unambiguous:
-compression consistently lets the agent run longer.)
+"reversed by batch / looked like noise" was an artifact of slicing the observer DB with
+IST folder times against its UTC timestamps, which clipped batches 4–5. Once windowed
+correctly in UTC, DB turn counts match the trajectories exactly and the trajectory data
+is unambiguous: compression consistently lets the agent run longer.)
 
 ---
 
 ## 6. The three-order hypothesis, judged
 
 1. **Compression works (1st order)** — ✅ **Confirmed.** Heavier ON payloads are
-   compressed back below the OFF arm at the model boundary; `stash` does ~93% of it.
-2. **Token / cost savings (2nd order)** — ⚠️ **Neutral.** Per-turn savings are real, but
-   the freed headroom is spent on +9.2% more turns → **net model-billed cost is flat.**
-   Byte savings ≠ cost savings.
+   compressed back below the OFF arm at the model boundary (4,662 vs 5,473 input
+   tokens/turn); `stash` does ~94% of it.
+2. **Token / cost savings (2nd order)** — ✅ **Confirmed.** Despite running +9.2% more
+   turns, ON sends **−14.8% input tokens/turn and −9.1% total input tokens** than OFF at
+   the model, and **costs less in both meters** (−6.8% proxy / −1.0% trajectory).
+   Compression nets a real model-side efficiency gain — not just a proxy-layer byte count.
 3. **Freed context → more turns → better reasoning (3rd order)** — 🟡 **Half true.** The
    mechanism is real and reproducible: compression keeps the model payload small, so the
    agent runs longer before hitting limits. **But those extra turns bought 0 extra
    resolutions (31 vs 32).** Capacity went up; productivity stayed flat.
 
-**One-liner:** compression buys you a smaller, longer-running agent at the same price and
-the same success rate. The "freed context helps it reason" story has a real mechanism but
-no measured payoff at this sample size.
+**One-liner:** compression buys you a smaller, cheaper, longer-running agent at the same
+success rate. The "freed context helps it reason" story has a real mechanism but no
+measured payoff at this sample size.
 
 ---
 
@@ -140,21 +165,25 @@ no measured payoff at this sample size.
 
 1. **Trials < 150/arm** (141 ON, 142 OFF): occasional harness-side evaluation failures,
    unrelated to compression.
-2. **Compression mechanism breakdown is on batches 1–3** (90 ON runs): the live proxy
-   held an uncheckpointed WAL for batches 4–5, so per-event compression rows past
-   06-24 11:52 were not readable without stopping the proxy. Mechanism *ratios* are
-   content-driven and stable across batches; resolve rate, tokens, turns, and cost are
-   full n=50 (from trajectory files, not the DB).
+2. **Cost meters disagree on absolute magnitude.** The proxy DB prices the run at
+   ~$23–25; litellm's trajectory `instance_cost` at ~$7.60–7.68 (~3× apart, different
+   price tables for gpt-5.3-codex). Both agree directionally (ON ≤ OFF); the
+   meter-independent result is the token reduction. The DB cost also includes patch-retry
+   turns (OFF had more of them), which the trajectory cost excludes.
 3. **Single model**: results are specific to gpt-5.3-codex.
+
+(All 5 batches are captured in the observer DB — verified by UTC-windowed turn counts
+matching the trajectories exactly for batches 3/4/5. There is no data-coverage gap.)
 
 ---
 
 ## Conclusion
 
 The observer compression proxy is **non-inferior on SWE-bench Verified resolve rate**
-(−0.5pp, 0.14 SE), **cost-neutral** at the model boundary ($7.60 vs $7.68), and makes the
-agent **systematically more exploratory** (+9.2% turns, 9/10 repos). It is **safe to
-enable** for context-headroom and footprint reasons. It does **not**, in this sample,
-convert freed context into additional resolved instances.
+(−0.5pp, 0.14 SE), **modestly cheaper at the model boundary** (−9.1% model-side input
+tokens; cost lower in both meters), and makes the agent **systematically more
+exploratory** (+9.2% turns, 9/10 repos). It is **safe to enable**: it cuts model-side
+tokens, cost, and footprint at no resolve-rate cost. It does **not**, in this sample,
+convert the freed context into additional resolved instances.
 
-**Gate 2.3: CLOSED — PASS (non-inferior, cost-neutral).**
+**Gate 2.3: CLOSED — PASS (non-inferior, modest token/cost saving).**
