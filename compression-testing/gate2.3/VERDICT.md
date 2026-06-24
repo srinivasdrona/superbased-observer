@@ -10,10 +10,10 @@
 ## Headline
 
 Compression is **non-inferior on resolve rate, modestly cheaper at the model boundary
-(−9% model-side input tokens, lower cost in both meters), and systematically more
-exploratory — but the extra exploration produced zero extra fixes.** Safe to ship: it
-saves model-side tokens/cost and footprint at no resolve-rate cost. No measured
-problem-solving benefit from "freed context" in this sample.
+(−9% model-side input tokens / −8.7% net of output, lower cost in both meters), and
+systematically more exploratory — but the extra exploration produced zero extra fixes.**
+Safe to ship: it saves model-side tokens/cost and footprint at no resolve-rate cost. No
+measured problem-solving benefit from "freed context" in this sample.
 
 ---
 
@@ -54,10 +54,34 @@ arms (correct UTC window `[06-23T07:30, 06-24T12:00]`):
 |--------|-----|------|---|
 | turns (incl. patch retries) | 2,395 | 2,243 | +6.8% |
 | input tokens / turn | **4,662** | **5,473** | **−14.8%** |
+| output tokens / turn | 114 | 114 | +0.1% |
 | total input tokens | 11.16M | 12.28M | **−9.1%** |
 | total output tokens | 273.8K | 256.1K | +6.9% |
+| **total input + output (net billed)** | **11.44M** | **12.53M** | **−8.7%** |
+| cache_read tokens | 0 | 0 | — |
+| cache_creation tokens | 0 | 0 | — |
 | cost (proxy meter, incl. retries) | $23.37 | $25.07 | −6.8% |
 | cost (trajectory meter, final traj) | $7.60 | $7.68 | −1.0% |
+
+**Output and cache, accounted explicitly (answering "is output in the savings?"):**
+
+- **Output is *not* what drives the headline, and it does not erase it.** Output tokens are
+  higher for ON (+6.9% total) **only because ON runs +6.8% more turns** — per-turn output is
+  flat (114 vs 114, +0.1%). Compression does not lengthen responses. Netting output in, the
+  **all-tokens-billed saving is −8.7%** (vs −9.1% input-only); output is ~2.4% of all tokens,
+  so it dents the headline by ~0.4pp but never flips it. Cost (−6.8%) **already includes
+  output** — and is smaller than the −8.7% token saving precisely because ON's larger output
+  share is priced higher, partly offsetting the input win.
+- **Cache is uniformly zero in both arms** (`cache_read = cache_creation = 0`). The Azure
+  `gpt-5.3-codex` responses carried no `cached_tokens`: across **all 7,599 codex turns**
+  logged (both DBs, all-time — incl. ~3,700 turns with prompts >5K tokens, one at 240K),
+  **not a single turn reported a cache hit**, and the litellm trajectory meter has no cache
+  field at all. The proxy maps `prompt_tokens_details.cached_tokens` correctly (covered by
+  unit tests) and nets it out of `input_tokens`, so the input counts above are **full gross
+  prompt tokens, undistorted by caching**. Because *both* arms ran in the identical
+  no-cache(-reported) regime the A/B is uncontaminated — but absolute cost assumes **no cache
+  discount**, and whether Azure cached silently server-side is unknowable from this data
+  (see Limitations #4).
 
 **The mechanism is now clean and complete:**
 
@@ -199,6 +223,15 @@ measured payoff at this sample size.
    turns (OFF had more of them), which the trajectory cost excludes — almost all in
    batch 1; by batches 4–5 both arms retry zero times (see §2).
 3. **Single model**: results are specific to gpt-5.3-codex.
+4. **Cache-blind on this path.** Every cache column is zero because the Azure gpt-5.3-codex
+   deployment never surfaced `cached_tokens` (and the trajectory meter has no cache field at
+   all). That a SWE-agent run had *no* genuine within-instance cache hits is implausible —
+   turns 2..N reuse a long stable prefix — so the likeliest reading is a **reporting gap (we
+   are cache-blind, not cache-free)**, not confirmed absence of caching. For this A/B it is
+   immaterial (both arms identical, so the −8.7%/−6.8% deltas stand), but absolute cost may be
+   **overstated for both arms**, and — critically — the **Gate 2.4 cache-busting hypothesis is
+   unmeasurable on this Azure-codex path**: it needs a deployment/API-version that returns
+   `cached_tokens`, or an Anthropic model with explicit `cache_creation`/`cache_read`.
 
 (All 5 batches are captured in the observer DB — verified by UTC-windowed turn counts
 matching the trajectories exactly for batches 3/4/5. There is no data-coverage gap.)
@@ -219,12 +252,13 @@ convert the freed context into additional resolved instances.
 | Order | Claim | Verdict |
 |-------|-------|---------|
 | **1st — compression works** | payload shrinks at the model boundary | ✅ **Yes** — ON below OFF (4,662 vs 5,473 input tok/turn, −14.8%) |
-| **2nd — it saves tokens / cost** | fewer tokens, lower cost | ✅ **Yes** — −9.1% total model-side input tokens; cheaper in both cost meters (−1% to −6.8%) |
+| **2nd — it saves tokens / cost** | fewer tokens, lower cost | ✅ **Yes** — −9.1% input / −8.7% net (incl. output) model-side tokens; cheaper in both cost meters (−1% to −6.8%); cache = 0 in both arms |
 | **3rd — freed context → more turns → more fixes** | the agent reasons better | ❌ **No** — +9.2% more turns, but 0 extra resolutions (31 vs 32) |
 
-**Net: resolve-neutral (non-inferior, −0.5pp), ~9% token saving, directionally cheaper.**
-The efficiency case holds; the "smarter reasoning" case does not — extra capacity, zero
-extra productivity. The token saving (−9.1%) is the meter-independent hard number; "reduces
-cost" is solid on direction but fuzzy on magnitude (the two cost meters disagree ~3×).
+**Net: resolve-neutral (non-inferior, −0.5pp), −9.1% input / −8.7% net (incl. output) token
+saving, directionally cheaper.** The efficiency case holds; the "smarter reasoning" case does
+not — extra capacity, zero extra productivity. The token saving (−9.1% input, −8.7% net of
+output) is the meter-independent hard number; "reduces cost" is solid on direction but fuzzy
+on magnitude (the two cost meters disagree ~3×).
 
 **Gate 2.3: CLOSED — PASS (non-inferior, modest token/cost saving).**
