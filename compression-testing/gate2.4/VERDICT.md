@@ -85,6 +85,12 @@ Compressible payload **59.8 MB → 34.9 MB = 41.7% reduction.** Attribution:
 to Gate 2.3. The byte-level compression is real and substantial; the question is whether it
 translates to dollars (§4: it does not).
 
+> **Split by outcome** — see [`SPLIT_ANALYSIS.md`](SPLIT_ANALYSIS.md). Compression is
+> resolution-neutral (32.4% reduction on resolved runs vs 35.6% on unresolved) and its largest
+> absolute effect lands on **unresolved** runs, where it tames a +56.6% agent-side context
+> explosion down to −20.8% at the model boundary. Per-instance attribution via validated
+> epoch-bucketing of the proxy DB (149/150 OFF, 146/150 ON runs match `api_calls` within ±1).
+
 ---
 
 ## 4. Cost — the central Gate 2.4 finding
