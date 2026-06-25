@@ -1,0 +1,26 @@
+# Observer Proxy Configuration — Gate 2.4 Arm OFF (compression disabled)
+# Gate 2.4: SWE-bench Verified compression testing WITH cache_read capture
+# Port: 8841 (OFF arm, no compression)
+# Binary: bin/observer-2.4.exe (439ff1b — cache fix)
+
+[observer]
+db_path = "E:\\superbased-observer\\compression-testing\\gate2.4\\observer-off-2.4.db"
+log_level = "info"
+
+[observer.watch]
+enabled_adapters = []
+
+[proxy]
+enabled = true
+bind_address = "0.0.0.0"
+port = 8841
+openai_upstream = "https://ai-shinof1261ai979822964896.cognitiveservices.azure.com"
+
+[compression.shell]
+enabled = false
+
+[compression.indexing]
+enabled = false
+
+[compression.conversation]
+enabled = false

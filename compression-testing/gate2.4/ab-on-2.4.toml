@@ -1,0 +1,58 @@
+# Observer Proxy Configuration — Gate 2.4 Arm ON (full compression)
+# Gate 2.4: SWE-bench Verified compression testing WITH cache_read capture
+# Port: 8842 (ON arm, full compression — identical knobs to Gate 2.3 ON)
+# Binary: bin/observer-2.4.exe (439ff1b — cache fix)
+
+[observer]
+db_path = "E:\\superbased-observer\\compression-testing\\gate2.4\\observer-on-2.4.db"
+log_level = "info"
+
+[observer.watch]
+enabled_adapters = []
+
+[proxy]
+enabled = true
+bind_address = "0.0.0.0"
+port = 8842
+openai_upstream = "https://ai-shinof1261ai979822964896.cognitiveservices.azure.com"
+
+[profiles.by_provider]
+openai = "default"
+
+[compression.shell]
+enabled = true
+exclude_commands = [
+    "curl",
+    "playwright",
+    "rg",
+    "ripgrep",
+    "grep",
+    "cat",
+    "type",
+    "Get-Content",
+    "head",
+    "tail",
+    "less",
+    "more",
+]
+
+[compression.indexing]
+enabled = true
+max_excerpt_bytes = 16384
+
+[compression.conversation]
+enabled = true
+mode = "cache_aware"
+compress_types = ["json", "logs", "code", "tools"]
+preserve_last_n = 5
+
+[compression.conversation.logs]
+max_lines = 200
+head = 20
+tail = 20
+
+[compression.conversation.stash]
+enabled = true
+dir = "E:\\superbased-observer\\compression-testing\\gate2.4\\stash-on-2.4"
+threshold_bytes = 8192
+max_total_mb = 1024

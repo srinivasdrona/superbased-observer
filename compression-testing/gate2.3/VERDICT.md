@@ -82,6 +82,11 @@ arms (correct UTC window `[06-23T07:30, 06-24T12:00]`):
   no-cache(-reported) regime the A/B is uncontaminated — but absolute cost assumes **no cache
   discount**, and whether Azure cached silently server-side is unknowable from this data
   (see Limitations #4).
+  > **Correction (2026-06-25):** the root cause asserted in this bullet is wrong. Azure *did*
+  > return cache data; the proxy's non-streaming *Responses* parser only read the Chat-Completions
+  > key and **dropped it before the DB**. Fixed in `439ff1b` and proven by Gate 2.4 (cache now
+  > captured, cache-aware cost = −0.1%). The relative −8.7%/−6.8% deltas above are unaffected
+  > (both arms identical); see corrected **Limitation #4** and `gate2.4/VERDICT.md`.
 
 **The mechanism is now clean and complete:**
 
@@ -223,15 +228,25 @@ measured payoff at this sample size.
    turns (OFF had more of them), which the trajectory cost excludes — almost all in
    batch 1; by batches 4–5 both arms retry zero times (see §2).
 3. **Single model**: results are specific to gpt-5.3-codex.
-4. **Cache-blind on this path.** Every cache column is zero because the Azure gpt-5.3-codex
-   deployment never surfaced `cached_tokens` (and the trajectory meter has no cache field at
-   all). That a SWE-agent run had *no* genuine within-instance cache hits is implausible —
-   turns 2..N reuse a long stable prefix — so the likeliest reading is a **reporting gap (we
-   are cache-blind, not cache-free)**, not confirmed absence of caching. For this A/B it is
-   immaterial (both arms identical, so the −8.7%/−6.8% deltas stand), but absolute cost may be
-   **overstated for both arms**, and — critically — the **Gate 2.4 cache-busting hypothesis is
-   unmeasurable on this Azure-codex path**: it needs a deployment/API-version that returns
-   `cached_tokens`, or an Anthropic model with explicit `cache_creation`/`cache_read`.
+4. **Cache-blind on this path — root cause was a proxy parser bug, since fixed and
+   superseded by Gate 2.4 (NOT an Azure limitation).** Every cache column here is zero, but
+   the cause was **not** that Azure failed to return cache data. It was a **proxy parser gap**:
+   the non-streaming Azure *Responses* API (`resp_` IDs, which this run used) reports cache under
+   `usage.input_tokens_details.cached_tokens`, while the proxy's `parseOpenAIResponse` only read
+   the Chat-Completions key `prompt_tokens_details.cached_tokens`. So genuine cache hits were
+   received from Azure but **dropped before being written to the DB**. This was fixed in commit
+   `439ff1b` (`internal/proxy/provider.go` now reads the `input_tokens_details` fallback) and
+   **validated end-to-end**: an isolated live-probe and **Gate 2.4** (a same-cohort replay on the
+   fixed binary) both show warm turns logging `cache_read_tokens` correctly (~93% of turns carry a
+   cache read; cached tokens are ~6.6× the non-cached input). For *this* Gate 2.3 A/B the gap is
+   immaterial — both arms ran on the identical buggy parser, so the **−8.7% token / −6.8% proxy
+   cost deltas stand as relative measures**. But two consequences follow: (a) Gate 2.3's absolute
+   cache tokens are **unrecoverable** (never persisted); and (b) the **−6.8% proxy cost edge is
+   unreliable** — both arms were billed cache-free, which over-weights the input-token saving.
+   **Gate 2.4's cache-aware recompute corrects this: the cost delta is −0.1% (cost-neutral), not
+   −6.8%** (cached tokens are 10× cheaper and the ON arm's higher output offsets the input win).
+   See `gate2.4/VERDICT.md`. The earlier worry that this path could never measure cache was wrong —
+   it was a one-line parser fix, not an endpoint constraint.
 
 (All 5 batches are captured in the observer DB — verified by UTC-windowed turn counts
 matching the trajectories exactly for batches 3/4/5. There is no data-coverage gap.)
