@@ -46,8 +46,10 @@ Request body → compress-bench (Go, observer pipeline)
 |---|---|---|---|---|
 | Gate 1 | GSM8K (math accuracy) | Kimi-K2.6 / Azure | 100 per level × 8 levels | ✅ Complete |
 | Gate 2.1 | SWE-bench Verified (exploratory) | gpt-5.3-codex / Azure | 25 instances × 2 arms | ✅ **PASS** (closed 2026-06-22) |
-| Gate 2.2 | SWE-bench Verified (pre-registered) | gpt-5.3-codex / Azure | 50 instances × 2 arms | ✅ **PASS** (closed 2026-06-23, addendum 2026-06-23) |
-| Gate 2.3 | SWE-bench Verified (3× variance estimate) | gpt-5.3-codex / Azure | 50 instances × 3 reps × 2 arms | 🔲 Ready to run |
+| Gate 2.2 | SWE-bench Verified (pre-registered) | gpt-5.3-codex / Azure | 50 instances × 2 arms | ✅ **PASS** (closed 2026-06-23) |
+| Gate 2.3 | SWE-bench Verified (3× reps, cache-blind) | gpt-5.3-codex / Azure | 50 instances × 3 reps × 2 arms | ✅ **PASS** (closed 2026-06-24) |
+| Gate 2.4 | SWE-bench Verified (3× reps, cache-aware) | gpt-5.3-codex / Azure | 50 instances × 3 reps × 2 arms | ✅ **CLOSED** (2026-06-25; cost-neutral −0.1%) |
+| Gate 3 | SWE-bench Verified (full-coverage mode, drops enabled) | gpt-5.3-codex / Azure | 50 instances × 3 reps × 2 arms | 🔲 Planned |
 
 ---
 
@@ -187,38 +189,26 @@ accuracy impact on GSM8K. Proceed to Gate 2.
 
 ---
 
-### Gate 2.3 — Variance-Estimated Re-run (🔲 READY TO RUN)
+### Gate 2.3 — Variance-Estimated Re-run (✅ PASS, closed 2026-06-24)
 
-**Goal:** Establish a clean, symmetric n=50 signal with per-instance variance estimates to separate compression effect from trajectory-divergence noise.
+**Goal:** Establish a clean, symmetric n=50 signal with 3× reps to separate compression effect from trajectory-divergence noise.
 
-**Design:**
-- **Cohort:** same `gate2_2_subset_balanced_n50.txt` (50 instances, bug-fixed)
-- **Repetitions:** 3 per instance per arm → 300 runs/arm, 600 runs total
-- **Arms:** OFF (port 8831, compression disabled) / ON (port 8832, compression enabled)
-- **Batch execution:** 5 batches of 10 instances each; run harness after each batch
-- **Retry policy:** retry until agent produces a non-empty submitted patch (up to 10 attempts per instance per rep); once a patch is submitted the docker harness runs once — harness verdict is final, no re-runs on resolution status
-- **Bug fix:** `git clean -fdxq` → `git clean -fdq` already applied in runner
+**Result:** Resolution ON 22.0% (31/141 done) vs OFF 22.5% (32/142 done) — neutral. Input tokens −9.1%, turns +6.8%. Cache silently zero (proxy parser bug — fixed in 2.4). Cost comparison caveated (cache-blind billing). See `gate2.3/VERDICT.md`.
 
-**Primary metrics:**
-1. Resolve-rate non-inferiority (ON vs OFF, pooled across 3 reps): pass if Δ ≤ 3pp
-2. Billed `tokens_sent` ON vs OFF at **matched step counts** (equal-step subset)
-3. Per-mechanism compression breakdown (stash/logs/code/budget-drop)
+---
 
-**Analysis plan:**
-- Mixed/hierarchical model pooling within-instance variance across reps (100 df per arm)
-- Step-matched token comparison (within-instance, same step count only)
-- Resolution counts per arm: treat as Poisson; report 95% CI
+### Gate 2.4 — Cache-Aware Replay (✅ CLOSED, 2026-06-25)
 
-**Gate 2.3 Pass/Fail:**
+**Goal:** Exact replay of Gate 2.3 on committed `439ff1b` binary (cache-read parser bug fixed). First cache-aware token and cost accounting.
 
-| Criterion | Threshold |
-|-----------|-----------|
-| Resolve-rate Δ (ON vs OFF, pooled) | ≤ 3pp degradation |
-| Billed tokens ON vs OFF (equal-step subset) | ON ≤ OFF (savings preserved) |
-| Byte compression ratio | ≤ 0.80 |
-| Request/parse errors | 0 |
+**Key findings:**
+- Resolution: ON 31/150 = 20.7% vs OFF 31/150 = 20.7% — **dead heat (Δ = 0pp)**.
+- Tokens: input −8.7% (non-cached), cache_read −8.8%, output **+12%** (ON higher).
+- Byte compression: 41.7% (stash 91.1%, logs 8.6%, code 0.3%). Drop mechanism: **never fired** (disabled by `cache_aware` mode design).
+- Cost: OFF $7.501 vs ON $7.495 = **−0.1% (neutral)**. Gate 2.3's −6.8% was a cache-blind artifact.
+- Compression mode: `cache_aware` — compresses only `RoleTool` messages, drop pass disabled.
 
-**Artifacts:** `compression-testing/gate2/GATE2_3_VERDICT.md` (to be created post-run)
+See `gate2.4/VERDICT.md`, `gate2.4/SPLIT_ANALYSIS.md` (resolved-vs-unresolved decomposition).
 
 ---
 
@@ -312,26 +302,102 @@ counts split into raw / billable / cache-read.
 
 ---
 
-## What Else to Add
+---
 
-Three candidates worth considering for later gates:
+## Gate 3 — Full-Coverage Compression (drops enabled)
 
-1. **Gate 3 — Multi-model cost calibration**: Run the same SWE-bench slice
-   through 2–3 models (e.g., Sonnet 4.6, DeepSeek-V4-Pro) with compression
-   ON/OFF and compare cost savings per model tier. Answers: does compression
-   matter more at higher per-token cost?
+### Context: what Gate 2.4 proved, and what it left open
 
-2. **Gate 4 — Long-session stress test**: Capture real 50+ turn Claude Code
-   sessions and replay through the pipeline at extreme `target_ratio`
-   (0.50–0.60). Tests whether the drop mechanism fires and whether it
-   degrades agent continuity in long sessions.
+Gate 2.4 ran in `mode = cache_aware`. Per the source (`internal/compression/conversation/budget.go`):
 
-3. **Gate 5 — Cache coherence verification**: Measure Anthropic prefix-cache
-   hit rate with and without compression under `mode = cache_aware`. Answers:
-   does compression preserve or destroy the cache savings it was designed
-   to protect?
+> *ModeCacheAware narrows the enforcer's behaviour … drop pass is skipped entirely … per-type compression eligibility narrows to Role == RoleTool.*
 
-For now, **Gate 1 is complete and Gate 2 is the priority.**
+This means every prior gate has tested a deliberately conservative coverage slice:
+- Only `RoleTool` messages are compressed (user/assistant messages are untouched).
+- The budget-enforced **drop mechanism has never fired in any gate**, by design.
+- Byte savings (41.7% in 2.4) come entirely from stash (91%) and log/code compression on tool results.
+
+Gate 3 tests what happens when coverage expands to the full conversation and drops are enabled.
+
+### What changes
+
+Switch the ON arm from `mode = cache_aware` to **`mode = cache`**:
+
+| Setting | Gate 2.4 ON | Gate 3 ON | Effect |
+|---------|-------------|-----------|--------|
+| `mode` | `cache_aware` | `cache` | Drop pass enabled; all eligible messages compressed |
+| `target_ratio` | (implicit 0.85, drop never fired) | `0.70` | Drops fire when per-type compression leaves >30% room |
+| `preserve_last_n` | `5` | `3` | Fewer recent messages protected; more eligible for drop |
+| `logs.max_lines` | `200` (head 20 / tail 20) | `100` (head 15 / tail 15) | Tighter log truncation |
+| Stash threshold | `8192` bytes | `8192` bytes | Unchanged |
+| Compressor types | `json,logs,code,tools` | `json,logs,code,tools` | Unchanged |
+
+Why `mode=cache` not `mode=token`:
+- `cache` restricts drops to the **second half** of the conversation → leading prefix is preserved for model cache hits (avoids a full cache miss regression).
+- `mode=token` allows drops anywhere — the nuclear option, and likely destroys prefix cache hits. Gate 3 is not that test.
+- `target_ratio=0.70` means "compress to ≤70% of original"; given that per-type compression alone gets to ~65% byte size (41.7% byte reduction = 0.583× on actual compressible content, but stash accounts for 91% of that), the drop mechanism should fire on the longer, more bloated runs.
+
+### Hypothesis
+
+Gate 3 primary: **resolve rate is non-inferior** on the FULL-COVERAGE arm (Δ ≤ 3pp vs OFF).
+Alternative: drops cause context gaps the agent cannot bridge → rate drops > 3pp.
+
+Gate 2.4 establishes the baseline that zero-drop compression is safe. Gate 3 asks: does the next tier of aggressiveness break anything?
+
+### Design
+
+- **Cohort**: same `gate2_2_subset_balanced_n50.txt` (50 instances, balanced)
+- **Reps**: 3 per instance per arm → 150 per arm, 300 total
+- **Model**: gpt-5.3-codex via Azure (same as 2.3/2.4)
+- **Retry policy**: same (up to 10 attempts per instance per rep; harness runs once on first non-empty patch)
+- **Batching**: 5 batches of 10; harness after each batch
+
+| Arm | Port | Mode |
+|-----|------|------|
+| OFF | 8851 | Compression disabled (fresh run, same cohort/commits as 2.4) |
+| ON-FULL | 8852 | `mode=cache`, `target_ratio=0.70`, `preserve_last_n=3`, tighter logs |
+
+Fresh OFF arm (don't reuse 2.4 OFF): avoids any concern about model/API drift between June 25 and Gate 3 run date; both arms run contemporaneously.
+
+### Pass/Fail criteria
+
+| Criterion | Threshold | Gate 2.4 result |
+|-----------|-----------|-----------------|
+| Resolve-rate Δ (ON vs OFF) | ≤ 3pp | 0.0pp |
+| Drop mechanism fires | Must observe >0 drops (if 0: coverage didn't expand) | 0 drops (cache_aware by design) |
+| Byte compression ratio | < 0.65 (stricter than 2.4's 0.583 on compressible content) | ~0.583 compressible |
+| Cache-read tokens ON vs OFF | Not significantly reduced (drops shouldn't destroy prefix) | −8.8% |
+| Request/parse errors | 0 | 0 |
+
+Secondary (comparison to Gate 2.4 ON):
+- How much additional byte saving does full-coverage produce vs cache_aware?
+- Does cost improve further (more input saved, at expense of possibly more cache miss)?
+
+### Failure modes and their meaning
+
+| What happens | Interpretation | Next step |
+|---|---|---|
+| Drops fire, resolve rate neutral | Full-coverage compression is safe; expand to production | Gate 4: multi-model cost calibration |
+| Drops fire, resolve rate drops > 3pp | Drop mechanism is harmful; cache_aware is the right production setting | File bug; investigate which dropped messages cause failures |
+| Drops don't fire even with target_ratio=0.70 | Per-type compression already hits target; stash is that dominant | Lower target_ratio to 0.55 or investigate mode=token |
+| Cache-read tokens collapse ON vs OFF | mode=cache prefix disruption is worse than expected | Revert to cache_aware; drops confirmed unsafe for prefix cache |
+
+### Artifacts to create
+
+- `gate3/ab-off-3.toml` — OFF arm (compression disabled, port 8851)
+- `gate3/ab-on-3.toml` — ON arm (mode=cache, target_ratio=0.70, preserve_last_n=3)
+- `gate3/run_gate3.py` — runner (adapt run_gate2_4.py with new ports/dirs/config)
+- `gate3/VERDICT.md` — post-run verdict (same three-order framing as 2.4)
+
+---
+
+## Gates 4+ (tentative)
+
+1. **Gate 4 — Multi-model cost calibration**: Same SWE-bench slice through 2–3 models (Sonnet 4.6, DeepSeek-V4-Pro) with compression ON/OFF. Answers: does compression's cost impact vary by model tier?
+
+2. **Gate 5 — Long-session stress test**: Capture real 50+ turn sessions and replay at extreme `target_ratio` (0.50). Tests whether mode=token drops degrade agent continuity in extreme context.
+
+These are not planned until Gate 3 produces its verdict.
 
 ---
 
@@ -354,8 +420,11 @@ For now, **Gate 1 is complete and Gate 2 is the priority.**
 
 ## Estimated Budget
 
-| Gate | Cost estimate |
-|---|---|
-| Gate 1 (complete) | ~$8 Azure API credits (800 model calls) |
-| Gate 2 (50 instances × 2 arms × 1 model) | $500–$2,000 depending on model |
-| Gate 3 (3 models × Gate 2 scope) | $1,500–$6,000 |
+| Gate | Cost estimate | Actual |
+|---|---|---|
+| Gate 1 (complete) | ~$8 Azure API credits (800 model calls) | ~$8 |
+| Gate 2.1–2.2 | $500–$2,000 | ~$15–30 |
+| Gate 2.3 (complete) | — | ~$7.50 |
+| Gate 2.4 (complete) | — | OFF $7.501 / ON $7.495 = ~$15 |
+| Gate 3 (planned) | ~$15–20 (same cohort/model/reps as 2.4) | — |
+| Gate 4+ | TBD after Gate 3 | — |
