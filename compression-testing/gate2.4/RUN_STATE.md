@@ -105,16 +105,15 @@ export GATE24_RESUME_DIR=/mnt/e/superbased-observer/compression-testing/gate2.4/
 ```
 (run as root; `--resume` skips keys already in state.json.)
 
-## On completion (pending tasks)
+## ✅ Post-run tasks — ALL COMPLETE
 
-1. Read `grand_summary.json` + harness reports → build Gate 2.4 final summary
-   with full token accounting (net input, **cached**, output) + cache-aware cost.
-   Source gpt-5.3-codex cached-input pricing first.
-2. Correct Gate 2.3 `VERDICT.md` Limitation #4 (still wrongly blames Azure →
-   it was the proxy non-streaming Responses parser gap, fixed in `439ff1b`).
-   Do NOT alter frozen 2.3 numbers.
-3. Cleanup temp: `gate2.4/_dep_check.py`, `_netcheck.sh`, `_verify_constants.py`,
-   `gate2/_import_check.py`, `cache-probe/`.
+1. ✅ Cache-aware cost computed (`$7.501 OFF vs $7.495 ON = −0.1% neutral`); pricing sourced from OpenAI.
+2. ✅ Gate 2.4 VERDICT.md written (three-order framing). Committed `325db85`.
+3. ✅ Gate 2.3 VERDICT Limitation #4 corrected (proxy parser gap, not Azure; frozen numbers untouched). Committed `995b546`.
+4. ✅ SPLIT_ANALYSIS.md published (resolved-vs-unresolved compression split, validated epoch-bucketing). Committed `325db85`.
+5. ✅ Temp cleanup: `_dep_check.py`, `_netcheck.sh`, `_verify_constants.py`, `cache-probe/`, all `g24_*.py` scratch scripts removed.
+
+**Gate 2.4: CLOSED.**
 
 ## Key facts
 
